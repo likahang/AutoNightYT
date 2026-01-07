@@ -1,0 +1,20 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Generated Photoshop scripts
+modify_thumbnail_*.jsx
+
+# Generated text analysis files
+解析結果_*.txt
+
+# Photoshop files
+# PSD 檔案通常很大，不建議放在 Git 中。
+# 範本檔 '晚報YT縮圖.psd' 若有需要，建議另外存放。
+*.psd
+
+# Generated output folders (e.g., '0102_1800...')
+[0-9][0-9][0-9][0-9]_*
+
+# Reference images folder
+參考/
