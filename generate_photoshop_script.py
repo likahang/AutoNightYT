@@ -6,370 +6,571 @@
 
 import os
 import sys
+import csv
+import argparse
+import re
 import random
 from datetime import datetime
 from parse_thumbnail_txt import parse_file, get_today_mmdd
 
-# 設定Windows終端機編碼為UTF-8
+# --- UTF-8 for Windows ---
 if sys.platform == 'win32':
+    os.environ['PYTHONUTF8'] = '1'
     try:
-        os.system('chcp 65001 > nul 2>&1')
         if hasattr(sys.stdout, 'reconfigure'):
             sys.stdout.reconfigure(encoding='utf-8')
+        if hasattr(sys.stderr, 'reconfigure'):
+            sys.stderr.reconfigure(encoding='utf-8')
     except:
         pass
 
 
-def generate_jsx_script(result_data, psd_path, output_path):
+def load_color_schemes(csv_path):
+    """從CSV檔案載入配色方案"""
+    schemes = {}
+    try:
+        with open(csv_path, mode='r', encoding='utf-8') as infile:
+            reader = csv.reader(infile)
+            header = next(reader) # 跳過標頭
+            
+            key_map = ['base', 'stroke', 'special1', 'special2', 'shadow', 'explosion']
+
+            rows = list(reader)
+            i = 0
+            while i < len(rows):
+                row1 = rows[i]
+                if len(row1) > 1 and row1[0]:
+                    color_id = row1[0].upper()
+                    if i + 1 < len(rows):
+                        row2 = rows[i+1]
+                        
+                        colors1 = {key_map[j]: val.strip().lstrip('#') for j, val in enumerate(row1[2:])}
+                        colors2 = {key_map[j]: val.strip().lstrip('#') for j, val in enumerate(row2[2:])}
+
+                        schemes[color_id] = {"line1": colors1, "line2": colors2}
+                        i += 2
+                    else:
+                        i += 1
+                else:
+                    i += 1
+    except FileNotFoundError:
+        print(f"錯誤: 找不到顏色設定檔: {csv_path}")
+        return None
+    except Exception as e:
+        print(f"讀取CSV時發生錯誤: {e}")
+        return None
+        
+    return schemes
+
+def generate_jsx_script(result_data, color_scheme, psd_path, output_path):
     """生成Photoshop JSX腳本"""
     
     mmdd = get_today_mmdd()
     
-    # 清理檔案名稱，移除Windows不允許的字元
     def sanitize_filename(filename):
-        # Windows不允許的字元: < > : " / \ | ? *
-        # 也移除控制字元
-        invalid_chars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*']
-        for char in invalid_chars:
-            filename = filename.replace(char, '_')
-        # 移除開頭和結尾的點和空格
+        invalid_chars = r'[<>:"/\\|?*]'
+        filename = re.sub(invalid_chars, '_', filename)
         filename = filename.strip('. ')
-        # 移除連續的底線
-        while '__' in filename:
-            filename = filename.replace('__', '_')
-        # 限制長度（Windows路徑限制，PSD檔案名稱建議不超過255字元）
+        filename = re.sub(r'__+', '_', filename)
         if len(filename) > 200:
             filename = filename[:200]
         return filename
     
     new_filename = sanitize_filename(f"{mmdd}_{result_data['slag']}.psd")
     
-    # 轉義JavaScript字串中的特殊字元
     def escape_js_string(s):
         s = str(s)
-        s = s.replace('\\', '\\\\')  # 先處理反斜線
-        s = s.replace('"', '\\"')     # 處理雙引號
-        s = s.replace('\n', '\\n')    # 處理換行
-        s = s.replace('\r', '\\r')    # 處理回車
+        s = s.replace('\\', '\\\\')
+        s = s.replace('"', '\\"')
+        s = s.replace('\n', '\\n').replace('\r', '\\r')
         return s
     
-    title1 = escape_js_string(result_data['title_line1'])
-    title2 = escape_js_string(result_data['title_line2'])
+    title1_raw = result_data['title_line1']
+    title2_raw = result_data['title_line2']
+    
+    # 檢查第一行大標的引號是否成對
+    quote_count_1 = title1_raw.count('"')
+    if quote_count_1 % 2 != 0:
+        print(f"\n⚠️  警告: 第一行大標發現未閉合的引號，請檢查確認")
+        print(f"   標題內容: {title1_raw}")
+        print(f"   引號數量: {quote_count_1} (應為偶數)")
+        input("\n請按 Enter 繼續，或按 Ctrl+C 取消...")
+    
+    # 檢查第二行大標的引號是否成對
+    quote_count_2 = title2_raw.count('"')
+    if quote_count_2 % 2 != 0:
+        print(f"\n⚠️  警告: 第二行大標發現未閉合的引號，請檢查確認")
+        print(f"   標題內容: {title2_raw}")
+        print(f"   引號數量: {quote_count_2} (應為偶數)")
+        input("\n請按 Enter 繼續，或按 Ctrl+C 取消...")
+    
+    # 提取第一行大標的引號內文字
+    quoted_matches_1 = re.findall(r'"(.*?)"', title1_raw)
+    special_text_1 = escape_js_string(quoted_matches_1[0]) if len(quoted_matches_1) > 0 else ""
+    special_text_2 = escape_js_string(quoted_matches_1[1]) if len(quoted_matches_1) > 1 else ""
+    
+    # 提取第二行大標的引號內文字
+    quoted_matches_2 = re.findall(r'"(.*?)"', title2_raw)
+    special_text_3 = escape_js_string(quoted_matches_2[0]) if len(quoted_matches_2) > 0 else ""
+    special_text_4 = escape_js_string(quoted_matches_2[1]) if len(quoted_matches_2) > 1 else ""
+
+    title1 = escape_js_string(title1_raw)
+    title2 = escape_js_string(title2_raw)
     anchor_name = escape_js_string(result_data['anchor'])
     
-    # 生成隨機顏色（RGB）
-    r = random.randint(0, 255)
-    g = random.randint(0, 255)
-    b = random.randint(0, 255)
-    
-    # 準備路徑（轉換為正斜線）
+    line1_colors = color_scheme["line1"]
+    line2_colors = color_scheme["line2"]
+
     psd_path_escaped = os.path.abspath(psd_path).replace(os.sep, '/')
     output_path_escaped = os.path.abspath(output_path).replace(os.sep, '/')
     gen_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    # Define static parts of the script as regular strings
+    jsx_header = f"""
+#target photoshop
+app.bringToFront();
+// 晚報YT縮圖自動修改腳本
+// 生成時間: {gen_time}
+// 配色ID: {color_scheme.get('id', 'N/A')}
+"""
+
+    jsx_helpers = """
+// --- Helper Functions ---
+function hexToRgb(hex) {
+    if (!hex || hex.length !== 6) return { r: 255, g: 255, b: 255 };
+    var r = parseInt(hex.substring(0, 2), 16);
+    var g = parseInt(hex.substring(2, 4), 16);
+    var b = parseInt(hex.substring(4, 6), 16);
+    return { r: r, g: g, b: b };
+}
+
+function setTextColor(layer, hexColor) {
+    var rgb = hexToRgb(hexColor);
+    var solidColor = new SolidColor();
+    solidColor.rgb.red = rgb.r;
+    solidColor.rgb.green = rgb.g;
+    solidColor.rgb.blue = rgb.b;
+    layer.textItem.color = solidColor;
+}
+
+function colorQuotedText(textLayer, textToColor, hexColor) {
+    if (!textLayer || !textToColor || textToColor.length === 0 || !hexColor) return;
     
-    # 構建JSX腳本（使用字串連接避免f-string大括號問題）
-    script_lines = [
-        "#target photoshop",
-        "",
-        "// 晚報YT縮圖自動修改腳本",
-        f"// 生成時間: {gen_time}",
-        "",
-        "// 將 Hex 轉換為 RGB 的輔助函式",
-        "function hexToRgb(hex) {",
-        "    var r = parseInt(hex.substring(0, 2), 16);",
-        "    var g = parseInt(hex.substring(2, 4), 16);",
-        "    var b = parseInt(hex.substring(4, 6), 16);",
-        "    return { r: r, g: g, b: b };",
-        "}",
-        "",
-        "// 設定形狀圖層顏色的函式",
-        "function setShapeColor(r, g, b) {",
-        "    function s2t(s) { return app.stringIDToTypeID(s); }",
-        "",
-        "    var descriptor = new ActionDescriptor();",
-        "    var descriptor2 = new ActionDescriptor();",
-        "    var descriptor3 = new ActionDescriptor();",
-        "    var reference = new ActionReference();",
-        "",
-        "    reference.putEnumerated(s2t(\"contentLayer\"), s2t(\"ordinal\"), s2t(\"targetEnum\"));",
-        "    descriptor.putReference(s2t(\"null\"), reference);",
-        "",
-        "    // 這裡使用 Photoshop 內部的 ID：red, grain, blue",
-        "    descriptor3.putDouble(s2t(\"red\"), r);",
-        "    descriptor3.putDouble(s2t(\"grain\"), g);",
-        "    descriptor3.putDouble(s2t(\"blue\"), b);",
-        "    ",
-        "    descriptor2.putObject(s2t(\"color\"), s2t(\"RGBColor\"), descriptor3);",
-        "    descriptor.putObject(s2t(\"to\"), s2t(\"solidColorLayer\"), descriptor2);",
-        "",
-        "    executeAction(s2t(\"set\"), descriptor, DialogModes.NO);",
-        "}",
-        "",
-        "// 打開PSD檔案",
-        f'var psdFile = new File("{psd_path_escaped}");',
-        "if (!psdFile.exists) {",
-        '    alert("錯誤: 找不到PSD檔案: " + psdFile.fsName);',
-        "    exit();",
-        "}",
-        "app.open(psdFile);",
-        "",
-        "// 1. 重命名檔案",
-        f'var newName = "{new_filename}";',
-        "app.activeDocument.name = newName;",
-        "",
-        "// 2. 修改大標文字",
-        "// 找到「標」群組",
-        "var titleGroup = null;",
-        "for (var i = 0; i < app.activeDocument.layers.length; i++) {",
-        '    if (app.activeDocument.layers[i].name == "標") {',
-        "        titleGroup = app.activeDocument.layers[i];",
-        "        break;",
-        "    }",
-        "}",
-        "",
-        'if (titleGroup && titleGroup.typename == "LayerSet") {',
-        "    // 找到兩個大標圖層",
-        "    var titleLayers = [];",
-        "    for (var i = 0; i < titleGroup.layers.length; i++) {",
-        '        if (titleGroup.layers[i].name.indexOf("大標") != -1) {',
-        "            titleLayers.push(titleGroup.layers[i]);",
-        "        }",
-        "    }",
-        "    ",
-        "    if (titleLayers.length >= 2) {",
-        "        // 第一行大標替換第二個圖層，第二行大標替換第一個圖層",
-        "        try {",
-        f'            titleLayers[1].textItem.contents = "{title1}";',
-        f'            titleLayers[0].textItem.contents = "{title2}";',
-        "            ",
-            "            // 使用變形方式改變圖層寬度",
-            "            // 第一行大標 - 設定寬度為 1600",
-            "            app.activeDocument.activeLayer = titleLayers[1];",
-            "            var bounds1 = titleLayers[1].bounds;",
-            "            var currentWidth1 = bounds1[2] - bounds1[0];",
-            "            var currentHeight1 = bounds1[3] - bounds1[1];",
-            "            var scaleX1 = 1600 / currentWidth1;",
-            "            ",
-            "            // 使用 resize 方法 - 從左側縮放",
-            "            titleLayers[1].resize(scaleX1 * 100, 100, AnchorPosition.MIDDLELEFT);",
-            "            ",
-            "            // 第二行大標 - 設定寬度為 1620",
-            "            app.activeDocument.activeLayer = titleLayers[0];",
-            "            var bounds2 = titleLayers[0].bounds;",
-            "            var currentWidth2 = bounds2[2] - bounds2[0];",
-            "            var currentHeight2 = bounds2[3] - bounds2[1];",
-            "            var scaleX2 = 1620 / currentWidth2;",
-            "            ",
-            "            // 使用 resize 方法 - 從左側縮放",
-            "            titleLayers[0].resize(scaleX2 * 100, 100, AnchorPosition.MIDDLELEFT);",
-        "        } catch (e) {",
-        '            alert("修改大標文字時發生錯誤: " + e);',
-        "        }",
-        "        ",
-        "        // 為兩個大標圖層添加Outside Stroke 15px 和 Drop Shadow",
-        "        for (var i = 0; i < titleLayers.length; i++) {",
-        "            try {",
-        "                var layer = titleLayers[i];",
-        "                app.activeDocument.activeLayer = layer;",
-        "                ",
-        "                // 添加描邊和陰影效果 - 使用參考腳本的方法",
-        "                var s2t = stringIDToTypeID;",
-        "                ",
-        "                var descriptor = new ActionDescriptor();",
-        "                var reference = new ActionReference();",
-        "                reference.putProperty(s2t('property'), s2t('layerEffects'));",
-        "                reference.putEnumerated(s2t('layer'), s2t('ordinal'), s2t('targetEnum'));",
-        "                descriptor.putReference(s2t('null'), reference);",
-        "                ",
-        "                var effectsDesc = new ActionDescriptor();",
-        "                ",
-        "                // --- 1. 15px 外部描邊 ---",
-        "                var strokeDesc = new ActionDescriptor();",
-        "                strokeDesc.putBoolean(s2t('enabled'), true);",
-        "                strokeDesc.putUnitDouble(s2t('size'), s2t('pixelsUnit'), 15);",
-        "                strokeDesc.putEnumerated(s2t('style'), s2t('frameStyle'), s2t('outsetFrame')); // 外部",
-        "                ",
-        "                var strokeColor = new ActionDescriptor();",
-        "                strokeColor.putDouble(s2t('red'), 0);",
-        "                strokeColor.putDouble(s2t('grain'), 0);",
-        "                strokeColor.putDouble(s2t('blue'), 0);",
-        "                strokeDesc.putObject(s2t('color'), s2t('RGBColor'), strokeColor);",
-        "                effectsDesc.putObject(s2t('frameFX'), s2t('frameFX'), strokeDesc);",
-        "                ",
-        "                // --- 2. 硬邊陰影 ---",
-        "                var shadowDesc = new ActionDescriptor();",
-        "                shadowDesc.putBoolean(s2t('enabled'), true);",
-        "                shadowDesc.putEnumerated(s2t('mode'), s2t('blendMode'), s2t('normal')); // 混合模式: 正常",
-        "                shadowDesc.putUnitDouble(s2t('opacity'), s2t('percentUnit'), 100);",
-        "                shadowDesc.putUnitDouble(s2t('localLightingAngle'), s2t('angleUnit'), 120); // 角度 120",
-        "                shadowDesc.putUnitDouble(s2t('distance'), s2t('pixelsUnit'), 10); // 距離 10px",
-        "                shadowDesc.putUnitDouble(s2t('chokeMatte'), s2t('pixelsUnit'), 100); // 展開 (Spread) 100%",
-        "                shadowDesc.putUnitDouble(s2t('blur'), s2t('pixelsUnit'), 18); // 尺寸 (Size) 18px",
-        "                ",
-        "                var shadowColor = new ActionDescriptor();",
-        "                shadowColor.putDouble(s2t('red'), 0);",
-        "                shadowColor.putDouble(s2t('grain'), 0);",
-        "                shadowColor.putDouble(s2t('blue'), 0);",
-        "                shadowDesc.putObject(s2t('color'), s2t('RGBColor'), shadowColor);",
-        "                effectsDesc.putObject(s2t('dropShadow'), s2t('dropShadow'), shadowDesc);",
-        "                ",
-        "                // --- 執行套用 ---",
-        "                descriptor.putObject(s2t('to'), s2t('layerEffects'), effectsDesc);",
-        "                executeAction(s2t('set'), descriptor, DialogModes.NO);",
-        "            } catch (e) {",
-        "                alert('為大標圖層添加描邊和陰影時發生錯誤: ' + e);",
-        "            }",
-        "        }",
-        "    } else {",
-        '        alert("警告: 只找到 " + titleLayers.length + " 個大標圖層，需要2個");',
-        "    }",
-        '} else if (!titleGroup) {',
-        '    alert("警告: 找不到「標」圖層群組");',
-        "}",
-        "",
-        "// 3. 設定主播圖層可見性",
-        "var anchorGroup = null;",
-        "for (var i = 0; i < app.activeDocument.layers.length; i++) {",
-        '    if (app.activeDocument.layers[i].name == "主播") {',
-        "        anchorGroup = app.activeDocument.layers[i];",
-        "        break;",
-        "    }",
-        "}",
-        "",
-        'if (anchorGroup && anchorGroup.typename == "LayerSet") {',
-        "    // 主播名字對應",
-        "    var anchorMapping = {",
-        '        "林嘉源": "林嘉源",',
-        '        "鄭亦真": "鄭亦真 ",',
-        '        "張雅婷": "張雅婷",',
-        '        "洪淑芬": "洪淑芬",',
-        '        "麥玉潔": "麥玉潔",',
-        '        "何橞瑢": "何橞瑢"',
-        "    };",
-        "    ",
-        f'    var targetName = anchorMapping["{anchor_name}"] || "{anchor_name}";',
-        "    var layersToDelete = [];",
-        "    var foundTarget = false;",
-        "    ",
-        "    for (var i = 0; i < anchorGroup.layers.length; i++) {",
-        "        var layer = anchorGroup.layers[i];",
-        "        var layerName = layer.name;",
-        "        // 移除尾隨空格",
-        '        while (layerName.length > 0 && layerName.charAt(layerName.length - 1) == " ") {',
-        "            layerName = layerName.substring(0, layerName.length - 1);",
-        "        }",
-        "        ",
-        "        if (layerName == targetName) {",
-        "            layer.visible = true;",
-        "            foundTarget = true;",
-        "        } else {",
-        "            layersToDelete.push(layer);",
-        "        }",
-        "    }",
-        "    ",
-        "    if (!foundTarget) {",
-        '        alert("警告: 找不到主播圖層「" + targetName + "」");',
-        "    }",
-        "    ",
-        "    // 刪除其他主播圖層（從後往前刪除，避免索引問題）",
-        "    for (var i = layersToDelete.length - 1; i >= 0; i--) {",
-        "        try {",
-        "            layersToDelete[i].remove();",
-        "        } catch (e) {",
-        '            alert("刪除圖層時發生錯誤: " + e);',
-        "        }",
-        "    }",
-        '} else if (!anchorGroup) {',
-        '    alert("警告: 找不到「主播」圖層群組");',
-        "}",
-        "",
-        "// 4. 修改精華版_顏色可變群組",
-        "var colorGroup = null;",
-        "for (var i = 0; i < app.activeDocument.layers.length; i++) {",
-        '    if (app.activeDocument.layers[i].name == "精華版_顏色可變") {',
-        "        colorGroup = app.activeDocument.layers[i];",
-        "        break;",
-        "    }",
-        "}",
-        "",
-        f'if (colorGroup && colorGroup.typename == "LayerSet") {{',
-        "    // 4.1 第一個圖層（索引0）替換成主播名字",
-        "    if (colorGroup.layers.length >= 1) {",
-        "        var nameLayer = colorGroup.layers[0]; // 第一個圖層（索引0）",
-        "        try {",
-        "            if (nameLayer.kind == LayerKind.TEXT) {",
-        f'                nameLayer.textItem.contents = "{anchor_name}";',
-        "            }",
-        "        } catch (e) {",
-        '            alert("修改第一個圖層文字時發生錯誤: " + e);',
-        "        }",
-        "    }",
-        "    ",
-        "    // 4.2 第4個圖層（索引3）隨機變色",
-        "    if (colorGroup.layers.length >= 4) {",
-        "        var targetLayer = colorGroup.layers[3]; // 第4個圖層（索引3）",
-        "        ",
-        "        // 定義顏色清單 (Hex 格式)",
-        "        var colorList = [",
-        '            "f05910", "fe4701", "dc1000", "a700fe", ',
-        '            "7800ff", "342292", "0031e5", "181aab", ',
-        '            "1f2966", "00a322", "008f5a", "007e0b"',
-        "        ];",
-        "        ",
-        "        // 隨機選取一個顏色",
-        "        var randomHex = colorList[Math.floor(Math.random() * colorList.length)];",
-        "        var rgb = hexToRgb(randomHex);",
-        "        ",
-        "        // 選擇圖層",
-        "        app.activeDocument.activeLayer = targetLayer;",
-        "        ",
-        "        try {",
-        "            setShapeColor(rgb.r, rgb.g, rgb.b);",
-        "        } catch (e) {",
-        '            alert("變更失敗。請確保選取的是「形狀圖層」或「純色填充層」。\\n錯誤: " + e);',
-        "        }",
-        "    } else {",
-        '        alert("警告: 「精華版_顏色可變」群組只有 " + colorGroup.layers.length + " 個圖層，需要至少4個");',
-        "    }",
-        '} else if (!colorGroup) {',
-        '    alert("警告: 找不到「精華版_顏色可變」圖層群組");',
-        "}",
-        "",
-        "// 保存檔案",
-        f'var saveFile = new File("{output_path_escaped}/" + newName);',
-        "// 確保目錄存在",
-        "if (!saveFile.parent.exists) {",
-        "    saveFile.parent.create();",
-        "}",
-        "",
-        "var psdOptions = new PhotoshopSaveOptions();",
-        "psdOptions.embedColorProfile = true;",
-        "psdOptions.alphaChannels = true;",
-        "psdOptions.layers = true;",
-        "",
-        "try {",
-        "    app.activeDocument.saveAs(saveFile, psdOptions);",
-        '    alert("處理完成！\\n檔案已保存為: " + newName);',
-        "} catch (e) {",
-        '    alert("保存檔案時發生錯誤: " + e + "\\n檔案路徑: " + saveFile.fsName);',
-        "}",
-    ]
+    try {
+        // 設置活動圖層
+        app.activeDocument.activeLayer = textLayer;
+        
+        // 獲取文字內容
+        var content = textLayer.textItem.contents;
+        var startIndex = content.indexOf(textToColor);
+        if (startIndex === -1) return;
+        
+        var rgb = hexToRgb(hexColor);
+        
+        // 使用參考腳本的方法
+        var originalRulerUnits = app.preferences.rulerUnits;
+        app.preferences.rulerUnits = Units.PIXELS;
+        
+        var ref = new ActionReference();
+        ref.putEnumerated(charIDToTypeID("Lyr "), charIDToTypeID("Ordn"), charIDToTypeID("Trgt"));
+        var layerDesc = executeActionGet(ref);
+        var textDesc = layerDesc.getObjectValue(stringIDToTypeID('textKey'));
+        var theText = textDesc.getString(stringIDToTypeID('textKey'));
+        
+        var rangeList = textDesc.getList(stringIDToTypeID('textStyleRange'));
+        var theStyleRanges = [];
+        var theStyleRanges2 = [];
+        
+        for (var o = 0; o < rangeList.count; o++) {
+            var thisList = rangeList.getObjectValue(o);
+            theStyleRanges.push(thisList.getObjectValue(stringIDToTypeID('textStyle')));
+            theStyleRanges2.push(thisList.getObjectValue(stringIDToTypeID('textStyle')));
+        }
+        
+        var idPxl = charIDToTypeID("#Pxl");
+        var idPnt = charIDToTypeID("#Pnt");
+        var idTxtt = charIDToTypeID("Txtt");
+        var idFrom = charIDToTypeID("From");
+        var idT = charIDToTypeID("T   ");
+        var idTxtS = charIDToTypeID("TxtS");
+        var idTxLr = charIDToTypeID("TxLr");
+        var idTxt = charIDToTypeID("Txt ");
+        var idsetd = charIDToTypeID("setd");
+        
+        // 構建樣式映射表 (Index -> Style)
+        var stylesMap = [];
+        var modifiableStylesMap = [];
+        
+        for (var o = 0; o < rangeList.count; o++) {
+            var rangeObj = rangeList.getObjectValue(o);
+            var rFrom = rangeObj.getInteger(idFrom);
+            var rTo = rangeObj.getInteger(idT);
+            
+            var style1 = theStyleRanges[o];
+            var style2 = theStyleRanges2[o];
+            
+            for (var k = rFrom; k < rTo; k++) {
+                stylesMap[k] = style1;
+                modifiableStylesMap[k] = style2;
+            }
+        }
+        
+        var desc6 = new ActionDescriptor();
+        var idnull = charIDToTypeID("null");
+        var ref1 = new ActionReference();
+        ref1.putEnumerated(idTxLr, charIDToTypeID("Ordn"), charIDToTypeID("Trgt"));
+        desc6.putReference(idnull, ref1);
+        
+        var desc7 = new ActionDescriptor();
+        desc7.putString(idTxt, theText);
+        var list2 = new ActionList();
+        
+        var targetStart = startIndex;
+        var targetEnd = startIndex + textToColor.length;
+        
+        for (var m = 0; m < theText.length; m++) {
+            var desc14 = new ActionDescriptor();
+            desc14.putInteger(idFrom, m);
+            desc14.putInteger(idT, m + 1);
+            
+            if (m >= targetStart && m < targetEnd) {
+                // 變色的字符 - 使用可修改的樣式副本
+                var coloredStyle = modifiableStylesMap[m] || theStyleRanges2[0];
+                var desc21 = new ActionDescriptor();
+                desc21.putDouble(charIDToTypeID("Rd  "), rgb.r);
+                desc21.putDouble(charIDToTypeID("Grn "), rgb.g);
+                desc21.putDouble(charIDToTypeID("Bl  "), rgb.b);
+                coloredStyle.putObject(charIDToTypeID("Clr "), charIDToTypeID("RGBC"), desc21);
+                desc14.putObject(idTxtS, idTxtS, coloredStyle);
+            } else {
+                // 普通字符 - 使用原始樣式
+                var originalStyle = stylesMap[m] || theStyleRanges[0];
+                desc14.putObject(idTxtS, idTxtS, originalStyle);
+            }
+            list2.putObject(charIDToTypeID("Txtt"), desc14);
+        }
+        
+        desc7.putList(idTxtt, list2);
+        desc6.putObject(idT, idTxLr, desc7);
+        executeAction(idsetd, desc6, DialogModes.NO);
+        
+        app.preferences.rulerUnits = originalRulerUnits;
+        
+    } catch (e) {
+        // 如果失敗則略過
+    }
+}
+
+function findLayer(name, parent) {
+    for (var i = 0; i < parent.layers.length; i++) {
+        var layer = parent.layers[i];
+        if (layer.name === name) return layer;
+        if (layer.typename === 'LayerSet') {
+            var found = findLayer(name, layer);
+            if (found) return found;
+        }
+    }
+    return null;
+}
+
+function applyLayerEffects(layer, strokeHex, shadowHex) {
+    app.activeDocument.activeLayer = layer;
+    var s2t = stringIDToTypeID;
+
+    var strokeRgb = hexToRgb(strokeHex);
+    var shadowRgb = hexToRgb(shadowHex);
+
+    var descriptor = new ActionDescriptor();
+    var reference = new ActionReference();
+    reference.putProperty(s2t('property'), s2t('layerEffects'));
+    reference.putEnumerated(s2t('layer'), s2t('ordinal'), s2t('targetEnum'));
+    descriptor.putReference(s2t('null'), reference);
     
-    return "\n".join(script_lines)
+    var effectsDesc = new ActionDescriptor();
+    
+    // Stroke
+    var strokeDesc = new ActionDescriptor();
+    strokeDesc.putBoolean(s2t('enabled'), true);
+    strokeDesc.putUnitDouble(s2t('size'), s2t('pixelsUnit'), 15);
+    strokeDesc.putEnumerated(s2t('style'), s2t('frameStyle'), s2t('outsetFrame'));
+    var strokeColorDesc = new ActionDescriptor();
+    strokeColorDesc.putDouble(s2t('red'), strokeRgb.r);
+    strokeColorDesc.putDouble(s2t('grain'), strokeRgb.g);
+    strokeColorDesc.putDouble(s2t('blue'), strokeRgb.b);
+    strokeDesc.putObject(s2t('color'), s2t('RGBColor'), strokeColorDesc);
+    effectsDesc.putObject(s2t('frameFX'), s2t('frameFX'), strokeDesc);
+    
+    // Drop Shadow
+    var shadowDesc = new ActionDescriptor();
+    shadowDesc.putBoolean(s2t('enabled'), true);
+    shadowDesc.putEnumerated(s2t('mode'), s2t('blendMode'), s2t('normal'));
+    shadowDesc.putUnitDouble(s2t('opacity'), s2t('percentUnit'), 100);
+    shadowDesc.putUnitDouble(s2t('localLightingAngle'), s2t('angleUnit'), 120);
+    shadowDesc.putUnitDouble(s2t('distance'), s2t('pixelsUnit'), 10);
+    shadowDesc.putUnitDouble(s2t('chokeMatte'), s2t('pixelsUnit'), 100);
+    shadowDesc.putUnitDouble(s2t('blur'), s2t('pixelsUnit'), 18);
+    var shadowColorDesc = new ActionDescriptor();
+    shadowColorDesc.putDouble(s2t('red'), shadowRgb.r);
+    shadowColorDesc.putDouble(s2t('grain'), shadowRgb.g);
+    shadowColorDesc.putDouble(s2t('blue'), shadowRgb.b);
+    shadowDesc.putObject(s2t('color'), s2t('RGBColor'), shadowColorDesc);
+    effectsDesc.putObject(s2t('dropShadow'), s2t('dropShadow'), shadowDesc);
+    
+    descriptor.putObject(s2t('to'), s2t('layerEffects'), effectsDesc);
+    executeAction(s2t('set'), descriptor, DialogModes.NO);
+}
+
+function removeQuotes(textLayer) {
+    if (!textLayer) return;
+    try {
+        var content = textLayer.textItem.contents;
+        var newContent = content.replace(/"/g, '');
+        textLayer.textItem.contents = newContent;
+    } catch (e) {
+        // 如果失敗則略過
+    }
+}
+
+// 讓 Rectangle 2 變色方式與精華版_顏色可變/Rectangle 1 一致
+function setShapeColor(layer, hexColor) {
+    if (!layer) return;
+    var rgb = hexToRgb(hexColor);
+    try {
+        app.activeDocument.activeLayer = layer;
+        var s2t = stringIDToTypeID;
+        var descriptor = new ActionDescriptor();
+        var reference = new ActionReference();
+        reference.putEnumerated(s2t("contentLayer"), s2t("ordinal"), s2t("targetEnum"));
+        descriptor.putReference(s2t("null"), reference);
+        var fillDesc = new ActionDescriptor();
+        var colorDesc = new ActionDescriptor();
+        colorDesc.putDouble(s2t("red"), rgb.r);
+        colorDesc.putDouble(s2t("grain"), rgb.g);
+        colorDesc.putDouble(s2t("blue"), rgb.b);
+        fillDesc.putObject(s2t("color"), s2t("RGBColor"), colorDesc);
+        descriptor.putObject(s2t("to"), s2t("solidColorLayer"), fillDesc);
+        executeAction(s2t("set"), descriptor, DialogModes.NO);
+    } catch (e) {
+        // fallback: 若失敗則略過
+    }
+}
+"""
+
+    # Use a standard string template to avoid f-string brace syntax errors
+    jsx_main_template = """
+// --- Main Script ---
+try {
+    // 0. 確保Photoshop視窗最大化以避免顯示空間問題
+    try {
+        app.bringToFront();
+        // 嘗試最大化應用程式視窗
+        var bounds = app.activeDocument ? app.activeDocument.window.bounds : null;
+    } catch (e) {
+        // 忽略視窗操作錯誤
+    }
+    
+    // 1. 開啟PSD檔案
+    var psdFile = new File("PSD_PATH_PLACEHOLDER");
+    if (!psdFile.exists) throw "找不到PSD檔案: " + psdFile.fsName;
+    
+    // 使用最簡單的方式開啟，讓Photoshop自己處理
+    app.open(psdFile);
+    var doc = app.activeDocument;
+    
+    // 2. 確保視窗適當顯示
+    try {
+        if (doc.window) {
+            // 設置檢視為適合視窗
+            doc.window.zoom = ZoomType.FITINWINDOW;
+        }
+    } catch (e) {
+        // 忽略檢視設置錯誤
+    }
+
+    // 3. Rename
+    var newName = "NEW_FILENAME_PLACEHOLDER";
+    doc.name = newName;
+
+    // 4. Update Titles
+    var titleGroup = findLayer("標", doc);
+    if (titleGroup) {
+        var titleLayer1 = titleGroup.layers[1];
+        var titleLayer2 = titleGroup.layers[0];
+
+        titleLayer1.textItem.contents = "TITLE1_PLACEHOLDER";
+        titleLayer2.textItem.contents = "TITLE2_PLACEHOLDER";
+        
+        // Remove quotes first to avoid overwriting color formatting
+        removeQuotes(titleLayer1);
+        removeQuotes(titleLayer2);
+
+        setTextColor(titleLayer1, "LINE1_BASE_COLOR");
+        setTextColor(titleLayer2, "LINE2_BASE_COLOR");
+        
+        applyLayerEffects(titleLayer1, "LINE1_STROKE_COLOR", "LINE1_SHADOW_COLOR");
+        applyLayerEffects(titleLayer2, "LINE2_STROKE_COLOR", "LINE2_SHADOW_COLOR");
+        
+        // Special Quoted Text Coloring - 第一行大標 (now without quotes)
+        colorQuotedText(titleLayer1, "SPECIAL_TEXT_1", "LINE1_SPECIAL1_COLOR");
+        colorQuotedText(titleLayer1, "SPECIAL_TEXT_2", "LINE1_SPECIAL2_COLOR");
+        
+        // Special Quoted Text Coloring - 第二行大標 (now without quotes)
+        colorQuotedText(titleLayer2, "SPECIAL_TEXT_3", "LINE2_SPECIAL1_COLOR");
+        colorQuotedText(titleLayer2, "SPECIAL_TEXT_4", "LINE2_SPECIAL2_COLOR");
+        
+        titleLayer1.resize(1380 / (titleLayer1.bounds[2] - titleLayer1.bounds[0]) * 100, 100, AnchorPosition.MIDDLELEFT);
+        titleLayer2.resize(1560 / (titleLayer2.bounds[2] - titleLayer2.bounds[0]) * 100, 100, AnchorPosition.MIDDLELEFT);
+    } else {
+        alert("警告: 找不到 '標' 圖層群組");
+    }
+
+    // 4.1 Update anchor name in 精華版_顏色可變
+    var colorGroup = findLayer("精華版_顏色可變", doc);
+    if (colorGroup && colorGroup.layers.length > 0) {
+        var anchorTextLayer = colorGroup.layers[0];
+        if (anchorTextLayer.kind && anchorTextLayer.kind.toString() === 'LayerKind.TEXT') {
+            anchorTextLayer.textItem.contents = "ANCHOR_NAME_PLACEHOLDER";
+        }
+    }
+
+    // 5. Update Anchor
+    var anchorGroup = findLayer("主播", doc);
+    if (anchorGroup) {
+        var anchorMap = {'林嘉源': '林嘉源', '鄭亦真': '鄭亦真 ', '張雅婷': '張雅婷', '洪淑芬': '洪淑芬', '麥玉潔': '麥玉潔', '何橞瑢': '何橞瑢' };
+        var targetName = anchorMap["ANCHOR_NAME_PLACEHOLDER"] || "ANCHOR_NAME_PLACEHOLDER";
+        
+        // Delete other anchor layers and keep only the target one
+        var layersToDelete = [];
+        for (var i = 0; i < anchorGroup.layers.length; i++) {
+            var layer = anchorGroup.layers[i];
+            var layerName = layer.name.replace(/\\s+$/, '');
+            if (layerName !== targetName) {
+                layersToDelete.push(layer);
+            } else {
+                layer.visible = true; // Make sure the target layer is visible
+            }
+        }
+        
+        // Delete the collected layers
+        for (var j = 0; j < layersToDelete.length; j++) {
+            layersToDelete[j].remove();
+        }
+    } else {
+        alert("警告: 找不到 '主播' 圖層群組");
+    }
+
+    // 6. Update "Rectangle 2" color (精確尋找效果群組下的 ShapeLayer)
+    var effectGroup = findLayer("效果", doc);
+    if (effectGroup && effectGroup.layers) {
+        var rect2 = null;
+        for (var i = 0; i < effectGroup.layers.length; i++) {
+            var lyr = effectGroup.layers[i];
+            if (lyr.name === "Rectangle 2" && lyr.kind && lyr.kind.toString() === 'LayerKind.SOLIDFILL') {
+                rect2 = lyr;
+                break;
+            }
+        }
+        if (rect2) {
+            setShapeColor(rect2, "EXPLOSION_COLOR");
+        } else {
+            alert("警告: '效果' 群組下找不到 ShapeLayer 'Rectangle 2'");
+        }
+    } else {
+        alert("警告: 找不到 '效果' 群組");
+    }
+
+    // 7. Save File and Close
+    var saveFile = new File("OUTPUT_PATH_PLACEHOLDER/" + newName);
+    if (!saveFile.parent.exists) saveFile.parent.create();
+    var psdOptions = new PhotoshopSaveOptions();
+    psdOptions.embedColorProfile = true;
+    psdOptions.alphaChannels = true;
+    psdOptions.layers = true;
+    doc.saveAs(saveFile, psdOptions);
+    doc.close(SaveOptions.DONOTSAVECHANGES);
+
+    alert("處理完成！\\n檔案已保存為: " + newName + "\\n位置: " + saveFile.fsName);
+
+} catch (e) {
+    alert("腳本執行時發生錯誤: " + e + "\\n\\n請確保Photoshop有足夠記憶體，並且PSD檔案沒有損壞。");
+}
+"""
+
+    # Perform replacements manually
+    replacements = {
+        "PSD_PATH_PLACEHOLDER": psd_path_escaped,
+        "NEW_FILENAME_PLACEHOLDER": new_filename,
+        "TITLE1_PLACEHOLDER": title1,
+        "TITLE2_PLACEHOLDER": title2,
+        "LINE1_BASE_COLOR": line1_colors['base'],
+        "LINE2_BASE_COLOR": line2_colors['base'],
+        "LINE1_STROKE_COLOR": line1_colors['stroke'],
+        "LINE1_SHADOW_COLOR": line1_colors['shadow'],
+        "LINE2_STROKE_COLOR": line2_colors['stroke'],
+        "LINE2_SHADOW_COLOR": line2_colors['shadow'],
+        "SPECIAL_TEXT_1": special_text_1,
+        "LINE1_SPECIAL1_COLOR": line1_colors['special1'],
+        "SPECIAL_TEXT_2": special_text_2,
+        "LINE1_SPECIAL2_COLOR": line1_colors['special2'],
+        "SPECIAL_TEXT_3": special_text_3,
+        "LINE2_SPECIAL1_COLOR": line2_colors['special1'],
+        "SPECIAL_TEXT_4": special_text_4,
+        "LINE2_SPECIAL2_COLOR": line2_colors['special2'],
+        "ANCHOR_NAME_PLACEHOLDER": anchor_name,
+        "EXPLOSION_COLOR": line1_colors['explosion'],
+        "OUTPUT_PATH_PLACEHOLDER": output_path_escaped
+    }
+    
+    jsx_main = jsx_main_template
+    for key, value in replacements.items():
+        jsx_main = jsx_main.replace(key, str(value))
+
+    return (jsx_header + jsx_helpers + jsx_main).strip()
 
 
 def main():
     """主程式"""
-    test_file = "1800 晚報YT縮圖2 賴清德認台灣要最壞打算.txt"
-    
+    parser = argparse.ArgumentParser(description="為晚報YT縮圖生成Photoshop腳本。 সন")
+    parser.add_argument("--file", required=True, help="包含縮圖資訊的文字檔路徑。")
+    parser.add_argument("--color-id", help="要使用的顏色方案編號 (例如 B01, R02)。如果省略，將隨機選取一個。 সন")
+    parser.add_argument("--psd", default="晚報YT縮圖.psd", help="Photoshop範本檔案的路徑。 সন")
+    parser.add_argument("--csv", default="晚報變色.csv", help="顏色配置CSV檔案的路徑。 সন")
+    parser.add_argument("--output-dir", default=".", help="生成的JSX和PSD檔案的輸出目錄。 সন")
+
+    args = parser.parse_args()
+
     print("="*60)
     print("生成Photoshop腳本")
     print("="*60)
+
+    print(f"\n正在載入顏色配置: {args.csv}")
+    color_schemes = load_color_schemes(args.csv)
+    if not color_schemes:
+        return
+
+    color_id = args.color_id
+    if color_id:
+        color_id = color_id.upper()
+        print(f"✓ 使用指定的顏色ID: {color_id}")
+    else:
+        available_ids = list(color_schemes.keys())
+        if not available_ids:
+            print("錯誤: 顏色設定檔中沒有可用的顏色ID。 সন")
+            return
+        color_id = random.choice(available_ids)
+        print(f"✓ 未指定顏色ID，隨機選取: {color_id}")
+
+    selected_scheme = color_schemes.get(color_id)
+    if not selected_scheme:
+        print(f"錯誤: 在 {args.csv} 中找不到顏色ID '{color_id}'。 সন")
+        print(f"可用ID: {', '.join(color_schemes.keys())}")
+        return
     
-    # 解析文字檔
-    print(f"\n正在解析文字檔: {test_file}")
-    result = parse_file(test_file)
-    
+    print(f"\n正在解析文字檔: {args.file}")
+    if not os.path.exists(args.file):
+        print(f"錯誤: 找不到輸入的文字檔: {args.file}")
+        return
+    result = parse_file(args.file)
     if not result:
         print("解析失敗")
         return
@@ -380,26 +581,32 @@ def main():
     print(f"  第一行大標: {result['title_line1']}")
     print(f"  第二行大標: {result['title_line2']}")
     
-    # 生成JSX腳本
-    psd_path = "晚報YT縮圖.psd"
-    if not os.path.exists(psd_path):
-        print(f"\n錯誤: 找不到PSD檔案: {psd_path}")
+    if not os.path.exists(args.psd):
+        print(f"\n錯誤: 找不到PSD檔案: {args.psd}")
         return
     
-    mmdd = get_today_mmdd()
-    script_content = generate_jsx_script(result, psd_path, ".")
+    selected_scheme['id'] = color_id
     
-    # 保存腳本
-    script_file = f"modify_thumbnail_{mmdd}.jsx"
+    script_content = generate_jsx_script(result, selected_scheme, args.psd, args.output_dir)
+    
+    mmdd = get_today_mmdd()
+    script_file = os.path.join(args.output_dir, f"modify_thumbnail_{mmdd}_{color_id.upper()}.jsx")
     with open(script_file, 'w', encoding='utf-8') as f:
         f.write(script_content)
     
     print(f"\n✓ Photoshop腳本已生成: {script_file}")
     print(f"\n使用方式:")
-    print(f"  1. 打開Photoshop")
-    print(f"  2. 選擇 檔案 > 腳本 > 瀏覽...")
-    print(f"  3. 選擇 {script_file}")
-    print(f"  4. 腳本會自動執行所有修改")
+    print(f"  1. 確保 '{args.psd}' 檔案存在於指定位置。 সন")
+    print(f"  2. 雙擊 {os.path.abspath(script_file)} 直接執行。 সন")
+    print(f"  或")
+    print(f"  2. 在Photoshop中選擇 檔案 > 腳本 > 瀏覽... সন")
+    print(f"  3. 選擇 {os.path.abspath(script_file)}")
+    print(f"\n腳本會自動:")
+    print(f"  - 啟動/切換到Photoshop")
+    print(f"  - 開啟PSD檔案")
+    print(f"  - 執行所有修改")
+    print(f"  - 另存新檔並關閉原檔案")
+    print(f"\n注意: 如果遇到顯示空間不足的錯誤，請確保螢幕解析度足夠或將Photoshop視窗最大化。")
 
 
 if __name__ == "__main__":
