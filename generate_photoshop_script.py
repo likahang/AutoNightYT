@@ -178,17 +178,7 @@ function colorQuotedText(textLayer, textToColor, hexColor) {
         var theText = textDesc.getString(stringIDToTypeID('textKey'));
         
         var rangeList = textDesc.getList(stringIDToTypeID('textStyleRange'));
-        var theStyleRanges = [];
-        var theStyleRanges2 = [];
         
-        for (var o = 0; o < rangeList.count; o++) {
-            var thisList = rangeList.getObjectValue(o);
-            theStyleRanges.push(thisList.getObjectValue(stringIDToTypeID('textStyle')));
-            theStyleRanges2.push(thisList.getObjectValue(stringIDToTypeID('textStyle')));
-        }
-        
-        var idPxl = charIDToTypeID("#Pxl");
-        var idPnt = charIDToTypeID("#Pnt");
         var idTxtt = charIDToTypeID("Txtt");
         var idFrom = charIDToTypeID("From");
         var idT = charIDToTypeID("T   ");
@@ -197,21 +187,16 @@ function colorQuotedText(textLayer, textToColor, hexColor) {
         var idTxt = charIDToTypeID("Txt ");
         var idsetd = charIDToTypeID("setd");
         
-        // 構建樣式映射表 (Index -> Style)
-        var stylesMap = [];
-        var modifiableStylesMap = [];
+        // 構建樣式映射表 (Index -> rangeIndex)
+        var styleIndexMap = [];
         
         for (var o = 0; o < rangeList.count; o++) {
             var rangeObj = rangeList.getObjectValue(o);
             var rFrom = rangeObj.getInteger(idFrom);
             var rTo = rangeObj.getInteger(idT);
             
-            var style1 = theStyleRanges[o];
-            var style2 = theStyleRanges2[o];
-            
             for (var k = rFrom; k < rTo; k++) {
-                stylesMap[k] = style1;
-                modifiableStylesMap[k] = style2;
+                styleIndexMap[k] = o;
             }
         }
         
@@ -233,20 +218,20 @@ function colorQuotedText(textLayer, textToColor, hexColor) {
             desc14.putInteger(idFrom, m);
             desc14.putInteger(idT, m + 1);
             
+            // 每次都重新讀取樣式，避免引用問題
+            var rangeIdx = styleIndexMap[m] !== undefined ? styleIndexMap[m] : 0;
+            var currentStyle = rangeList.getObjectValue(rangeIdx).getObjectValue(stringIDToTypeID('textStyle'));
+            
             if (m >= targetStart && m < targetEnd) {
-                // 變色的字符 - 使用可修改的樣式副本
-                var coloredStyle = modifiableStylesMap[m] || theStyleRanges2[0];
+                // 變色的字符
                 var desc21 = new ActionDescriptor();
                 desc21.putDouble(charIDToTypeID("Rd  "), rgb.r);
                 desc21.putDouble(charIDToTypeID("Grn "), rgb.g);
                 desc21.putDouble(charIDToTypeID("Bl  "), rgb.b);
-                coloredStyle.putObject(charIDToTypeID("Clr "), charIDToTypeID("RGBC"), desc21);
-                desc14.putObject(idTxtS, idTxtS, coloredStyle);
-            } else {
-                // 普通字符 - 使用原始樣式
-                var originalStyle = stylesMap[m] || theStyleRanges[0];
-                desc14.putObject(idTxtS, idTxtS, originalStyle);
+                currentStyle.putObject(charIDToTypeID("Clr "), charIDToTypeID("RGBC"), desc21);
             }
+            
+            desc14.putObject(idTxtS, idTxtS, currentStyle);
             list2.putObject(charIDToTypeID("Txtt"), desc14);
         }
         
@@ -328,6 +313,115 @@ function removeQuotes(textLayer) {
         textLayer.textItem.contents = newContent;
     } catch (e) {
         // 如果失敗則略過
+    }
+}
+
+function setLastCharBaselineShift(textLayer, shiftValue) {
+    if (!textLayer) return;
+    try {
+        app.activeDocument.activeLayer = textLayer;
+        
+        var content = textLayer.textItem.contents;
+        if (content.length === 0) return;
+        
+        var lastCharIndex = content.length - 1;
+        
+        // 讀取現有的 textKey
+        var ref = new ActionReference();
+        ref.putEnumerated(charIDToTypeID("Lyr "), charIDToTypeID("Ordn"), charIDToTypeID("Trgt"));
+        var layerDesc = executeActionGet(ref);
+        var textKey = layerDesc.getObjectValue(stringIDToTypeID("textKey"));
+        var theText = textKey.getString(stringIDToTypeID("textKey"));
+        var rangeList = textKey.getList(stringIDToTypeID("textStyleRange"));
+        
+        // 構建新的 textStyleRange 列表
+        var newRangeList = new ActionList();
+        
+        for (var i = 0; i < rangeList.count; i++) {
+            var range = rangeList.getObjectValue(i);
+            var from = range.getInteger(stringIDToTypeID("from"));
+            var to = range.getInteger(stringIDToTypeID("to"));
+            var oldStyle = range.getObjectValue(stringIDToTypeID("textStyle"));
+            
+            // 檢查最後一個字符是否在這個 range 中
+            if (lastCharIndex >= from && lastCharIndex < to) {
+                if (from < lastCharIndex) {
+                    // 前面部分保持原樣
+                    var frontRange = new ActionDescriptor();
+                    frontRange.putInteger(stringIDToTypeID("from"), from);
+                    frontRange.putInteger(stringIDToTypeID("to"), lastCharIndex);
+                    frontRange.putObject(stringIDToTypeID("textStyle"), stringIDToTypeID("textStyle"), oldStyle);
+                    newRangeList.putObject(stringIDToTypeID("textStyleRange"), frontRange);
+                }
+                
+                // 最後一個字符：複製樣式並設定基線位移
+                var lastRange = new ActionDescriptor();
+                lastRange.putInteger(stringIDToTypeID("from"), lastCharIndex);
+                lastRange.putInteger(stringIDToTypeID("to"), to);
+                
+                // 複製所有屬性
+                var newStyle = new ActionDescriptor();
+                for (var k = 0; k < oldStyle.count; k++) {
+                    var key = oldStyle.getKey(k);
+                    var keyStr = typeIDToStringID(key);
+                    // 跳過 baselineShift 和 impliedBaselineShift，我們會重新設定
+                    if (keyStr === "baselineShift" || keyStr === "impliedBaselineShift") continue;
+                    var type = oldStyle.getType(key);
+                    switch (type) {
+                        case DescValueType.BOOLEANTYPE: newStyle.putBoolean(key, oldStyle.getBoolean(key)); break;
+                        case DescValueType.INTEGERTYPE: newStyle.putInteger(key, oldStyle.getInteger(key)); break;
+                        case DescValueType.DOUBLETYPE: newStyle.putDouble(key, oldStyle.getDouble(key)); break;
+                        case DescValueType.STRINGTYPE: newStyle.putString(key, oldStyle.getString(key)); break;
+                        case DescValueType.OBJECTTYPE: newStyle.putObject(key, oldStyle.getObjectType(key), oldStyle.getObjectValue(key)); break;
+                        case DescValueType.ENUMERATEDTYPE: newStyle.putEnumerated(key, oldStyle.getEnumerationType(key), oldStyle.getEnumerationValue(key)); break;
+                        case DescValueType.UNITDOUBLE: newStyle.putUnitDouble(key, oldStyle.getUnitDoubleType(key), oldStyle.getUnitDoubleValue(key)); break;
+                        case DescValueType.LISTTYPE: newStyle.putList(key, oldStyle.getList(key)); break;
+                    }
+                }
+                
+                // 設定基線位移 (使用 pixelsUnit)
+                newStyle.putUnitDouble(stringIDToTypeID("baselineShift"), stringIDToTypeID("pixelsUnit"), shiftValue);
+                newStyle.putUnitDouble(stringIDToTypeID("impliedBaselineShift"), stringIDToTypeID("pixelsUnit"), shiftValue);
+                
+                lastRange.putObject(stringIDToTypeID("textStyle"), stringIDToTypeID("textStyle"), newStyle);
+                newRangeList.putObject(stringIDToTypeID("textStyleRange"), lastRange);
+            } else {
+                // 其他 range 保持原樣
+                newRangeList.putObject(stringIDToTypeID("textStyleRange"), range);
+            }
+        }
+        
+        // 構建新的 textKey，複製所有其他屬性
+        var newTextKey = new ActionDescriptor();
+        for (var j = 0; j < textKey.count; j++) {
+            var tk = textKey.getKey(j);
+            if (tk == stringIDToTypeID("textStyleRange")) {
+                newTextKey.putList(stringIDToTypeID("textStyleRange"), newRangeList);
+            } else {
+                var ttype = textKey.getType(tk);
+                switch (ttype) {
+                    case DescValueType.BOOLEANTYPE: newTextKey.putBoolean(tk, textKey.getBoolean(tk)); break;
+                    case DescValueType.INTEGERTYPE: newTextKey.putInteger(tk, textKey.getInteger(tk)); break;
+                    case DescValueType.DOUBLETYPE: newTextKey.putDouble(tk, textKey.getDouble(tk)); break;
+                    case DescValueType.STRINGTYPE: newTextKey.putString(tk, textKey.getString(tk)); break;
+                    case DescValueType.OBJECTTYPE: newTextKey.putObject(tk, textKey.getObjectType(tk), textKey.getObjectValue(tk)); break;
+                    case DescValueType.ENUMERATEDTYPE: newTextKey.putEnumerated(tk, textKey.getEnumerationType(tk), textKey.getEnumerationValue(tk)); break;
+                    case DescValueType.UNITDOUBLE: newTextKey.putUnitDouble(tk, textKey.getUnitDoubleType(tk), textKey.getUnitDoubleValue(tk)); break;
+                    case DescValueType.LISTTYPE: newTextKey.putList(tk, textKey.getList(tk)); break;
+                }
+            }
+        }
+        
+        // 套用修改
+        var desc = new ActionDescriptor();
+        var ref2 = new ActionReference();
+        ref2.putEnumerated(stringIDToTypeID("textLayer"), stringIDToTypeID("ordinal"), stringIDToTypeID("targetEnum"));
+        desc.putReference(stringIDToTypeID("null"), ref2);
+        desc.putObject(stringIDToTypeID("to"), stringIDToTypeID("textLayer"), newTextKey);
+        executeAction(stringIDToTypeID("set"), desc, DialogModes.NO);
+        
+    } catch (e) {
+        alert("基線位移設定失敗: " + e);
     }
 }
 
@@ -420,6 +514,9 @@ try {
         
         titleLayer1.resize(1380 / (titleLayer1.bounds[2] - titleLayer1.bounds[0]) * 100, 100, AnchorPosition.MIDDLELEFT);
         titleLayer2.resize(1560 / (titleLayer2.bounds[2] - titleLayer2.bounds[0]) * 100, 100, AnchorPosition.MIDDLELEFT);
+        
+        // 設定第一行大標最後一個字的基線位移 (-17.88px) - 在 resize 之後執行
+        setLastCharBaselineShift(titleLayer1, -17.88);
     } else {
         alert("警告: 找不到 '標' 圖層群組");
     }
