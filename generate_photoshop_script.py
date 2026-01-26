@@ -62,7 +62,69 @@ def load_color_schemes(csv_path):
         
     return schemes
 
-def generate_jsx_script(result_data, color_scheme, psd_path, output_path):
+def load_top_right_colors(csv_path):
+    """從CSV檔案載入右上變色方案"""
+    colors = {}
+    try:
+        with open(csv_path, mode='r', encoding='big5') as infile:
+            reader = csv.reader(infile)
+            next(reader)  # 跳過標頭
+            
+            for row in reader:
+                if len(row) > 1 and row[0].strip():
+                    group_id = row[0].strip().upper()  # A, B, C, D
+                    color_values = [val.strip().lstrip('#') for val in row[1:4]]
+                    colors[group_id] = color_values
+    except FileNotFoundError:
+        print(f"警告: 找不到右上變色檔: {csv_path}")
+        return None
+    except Exception as e:
+        print(f"讀取右上變色CSV時發生錯誤: {e}")
+        return None
+    
+    return colors
+
+def select_top_right_color(color_id, top_right_colors):
+    """根據配色系統ID選擇右上變色
+    
+    規則:
+    - O開頭 → 排除A組
+    - P開頭 → 排除B組
+    - B開頭 → 排除C組
+    - G開頭 → 排除D組
+    
+    返回選定的顏色十六進制值
+    """
+    if not top_right_colors:
+        return None
+    
+    # 根據色系ID首字母判斷排除的組別
+    exclude_map = {
+        'O': 'A',
+        'P': 'B',
+        'B': 'C',
+        'G': 'D'
+    }
+    
+    first_letter = color_id[0] if color_id else ''
+    excluded_group = exclude_map.get(first_letter)
+    
+    # 可用的組別
+    available_groups = [g for g in top_right_colors.keys() if g != excluded_group]
+    
+    if not available_groups:
+        print(f"警告: 配色系統 {color_id} 沒有可用的右上變色組別")
+        return None
+    
+    # 隨機選一個可用組別
+    selected_group = random.choice(available_groups)
+    # 從該組中隨機選一個顏色
+    selected_color = random.choice(top_right_colors[selected_group])
+    
+    print(f"✓ 右上變色: {selected_group}組 - {selected_color}")
+    return selected_color
+
+def generate_jsx_script(result_data, color_scheme, psd_path, output_path, top_right_color=None):
     """生成Photoshop JSX腳本"""
     
     mmdd = get_today_mmdd()
@@ -576,6 +638,15 @@ try {
         alert("警告: 找不到 '效果' 群組");
     }
 
+    // 6.1 Update "Rectangle 1" color in 精華版_顏色可變
+    var colorGroup2 = findLayer("精華版_顏色可變", doc);
+    if (colorGroup2 && colorGroup2.layers.length > 3) {
+        var rect1 = colorGroup2.layers[3];  // 第4個圖層（索引3）
+        if (rect1 && rect1.kind && rect1.kind.toString() === 'LayerKind.SOLIDFILL') {
+            setShapeColor(rect1, "TOP_RIGHT_COLOR");
+        }
+    }
+
     // 7. Save File and Close
     var saveFile = new File("OUTPUT_PATH_PLACEHOLDER/" + newName);
     if (!saveFile.parent.exists) saveFile.parent.create();
@@ -615,6 +686,7 @@ try {
         "LINE2_SPECIAL2_COLOR": line2_colors['special2'],
         "ANCHOR_NAME_PLACEHOLDER": anchor_name,
         "EXPLOSION_COLOR": line1_colors['explosion'],
+        "TOP_RIGHT_COLOR": top_right_color if top_right_color else "ffffff",
         "OUTPUT_PATH_PLACEHOLDER": output_path_escaped
     }
     
@@ -684,7 +756,14 @@ def main():
     
     selected_scheme['id'] = color_id
     
-    script_content = generate_jsx_script(result, selected_scheme, args.psd, args.output_dir)
+    # 載入右上變色方案
+    print(f"\n正在載入右上變色配置...")
+    top_right_colors = load_top_right_colors('右上變色.csv')
+    top_right_selected = None
+    if top_right_colors:
+        top_right_selected = select_top_right_color(color_id, top_right_colors)
+    
+    script_content = generate_jsx_script(result, selected_scheme, args.psd, args.output_dir, top_right_selected)
     
     mmdd = get_today_mmdd()
     script_file = os.path.join(args.output_dir, f"modify_thumbnail_{mmdd}_{color_id.upper()}.jsx")
