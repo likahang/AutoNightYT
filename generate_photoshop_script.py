@@ -124,7 +124,7 @@ def select_top_right_color(color_id, top_right_colors):
     print(f"✓ 右上變色: {selected_group}組 - {selected_color}")
     return selected_color
 
-def generate_jsx_script(result_data, color_scheme, psd_path, output_path, top_right_color=None):
+def generate_jsx_script(result_data, color_scheme, psd_path, output_path, top_right_color=None, creator=""):
     """生成Photoshop JSX腳本"""
     
     mmdd = get_today_mmdd()
@@ -138,7 +138,12 @@ def generate_jsx_script(result_data, color_scheme, psd_path, output_path, top_ri
             filename = filename[:200]
         return filename
     
-    new_filename = sanitize_filename(f"{mmdd}_{result_data['slag']}.psd")
+    # 添加製作者到檔名
+    creator_suffix = ""
+    if creator and creator.strip() != "":
+        creator_suffix = f"_{creator.strip()}"
+    
+    new_filename = sanitize_filename(f"{mmdd}_{result_data['slag']}{creator_suffix}.psd")
     
     def escape_js_string(s):
         s = str(s)
@@ -516,6 +521,9 @@ function setShapeColor(layer, hexColor) {
     jsx_main_template = """
 // --- Main Script ---
 try {
+    // 禁用所有對話框
+    app.displayDialogs = DialogModes.NO;
+    
     // 0. 確保Photoshop視窗最大化以避免顯示空間問題
     try {
         app.bringToFront();
@@ -655,9 +663,26 @@ try {
     psdOptions.alphaChannels = true;
     psdOptions.layers = true;
     doc.saveAs(saveFile, psdOptions);
+    
+    // 8. Save for Web as JPG
+    var jpgName = newName.replace(/\.psd$/i, '.jpg');
+    var jpgFile = new File("OUTPUT_PATH_PLACEHOLDER/" + jpgName);
+    
+    var sfwOptions = new ExportOptionsSaveForWeb();
+    sfwOptions.format = SaveDocumentType.JPEG;
+    sfwOptions.includeProfile = false;
+    sfwOptions.interlaced = false;
+    sfwOptions.optimized = true;
+    sfwOptions.quality = 60;
+    
+    // 清理記憶體並執行垃圾回收
+    try { 
+        app.purge(); 
+    } catch(e) {}
+    
+    doc.exportDocument(jpgFile, ExportType.SAVEFORWEB, sfwOptions);
+    
     doc.close(SaveOptions.DONOTSAVECHANGES);
-
-    alert("處理完成！\\n檔案已保存為: " + newName + "\\n位置: " + saveFile.fsName);
 
 } catch (e) {
     alert("腳本執行時發生錯誤: " + e + "\\n\\n請確保Photoshop有足夠記憶體，並且PSD檔案沒有損壞。");
@@ -703,8 +728,9 @@ def main():
     parser.add_argument("--file", required=True, help="包含縮圖資訊的文字檔路徑。")
     parser.add_argument("--color-id", help="要使用的顏色方案編號 (例如 B01, R02)。如果省略，將隨機選取一個。 সন")
     parser.add_argument("--psd", default="晚報YT縮圖.psd", help="Photoshop範本檔案的路徑。 সন")
-    parser.add_argument("--csv", default="晚報變色.csv", help="顏色配置CSV檔案的路徑。 সন")
+    parser.add_argument("--csv", default="晚報變色.csv", help="顏色配置CSV檔案的路徑。 সन")
     parser.add_argument("--output-dir", default=".", help="生成的JSX和PSD檔案的輸出目錄。 সন")
+    parser.add_argument("--creator", default="", help="製作者名稱，將附加在PSD檔案名後。 সन")
 
     args = parser.parse_args()
 
@@ -763,10 +789,13 @@ def main():
     if top_right_colors:
         top_right_selected = select_top_right_color(color_id, top_right_colors)
     
-    script_content = generate_jsx_script(result, selected_scheme, args.psd, args.output_dir, top_right_selected)
+    script_content = generate_jsx_script(result, selected_scheme, args.psd, args.output_dir, top_right_selected, args.creator)
     
     mmdd = get_today_mmdd()
-    script_file = os.path.join(args.output_dir, f"modify_thumbnail_{mmdd}_{color_id.upper()}.jsx")
+    # 使用檔名的雜湊來確保唯一性，防止同色ID的檔案互相覆蓋
+    import hashlib
+    slug_hash = hashlib.md5(result['slag'].encode()).hexdigest()[:6].upper()
+    script_file = os.path.join(args.output_dir, f"modify_thumbnail_{mmdd}_{color_id.upper()}_{slug_hash}.jsx")
     with open(script_file, 'w', encoding='utf-8') as f:
         f.write(script_content)
     

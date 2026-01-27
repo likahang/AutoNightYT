@@ -84,17 +84,31 @@ def parse_file(file_path):
             if result["anchor"]:
                 break
         
-        # 3. 找出最底二行大標文字（包含空行），並移除效果字（括號及其內容）
-        if len(lines) >= 2:
-            title1 = lines[-2].strip()
-            title2 = lines[-1].strip()
-            # 移除括號及其內容（效果字）
-            result["title_line1"] = re.sub(r'\([^)]*\)', '', title1).strip()
-            result["title_line2"] = re.sub(r'\([^)]*\)', '', title2).strip()
-        elif len(lines) == 1:
-            title1 = lines[-1].strip()
-            # 移除括號及其內容（效果字）
-            result["title_line1"] = re.sub(r'\([^)]*\)', '', title1).strip()
+        # 3. 找出最後二行大標文字（跳過空行），並移除效果字（括號及其內容）
+        # 獲取所有非空的、有效的內容行
+        non_empty_lines = []
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            # 跳過前面的元数据行和空行
+            if stripped and not any(anchor in line for anchor in ANCHOR_NAMES) and i > 0:
+                # 檢查是否是大標行（不包含括號的純文本或有引號的文本）
+                if re.search(r'[a-zA-Z0-9\u4e00-\u9fff""]', stripped):
+                    non_empty_lines.append(stripped)
+        
+        # 提取最後的兩行（或一行，如果只有一行可用的大標）
+        if len(non_empty_lines) >= 2:
+            title1 = non_empty_lines[-2]
+            title2 = non_empty_lines[-1]
+        elif len(non_empty_lines) == 1:
+            title1 = non_empty_lines[-1]
+            title2 = ""
+        else:
+            title1 = ""
+            title2 = ""
+        
+        # 移除括號及其內容（效果字）
+        result["title_line1"] = re.sub(r'\([^)]*\)', '', title1).strip()
+        result["title_line2"] = re.sub(r'\([^)]*\)', '', title2).strip()
         
         # 4. 找出變色字（""內的文字）
         full_text = '\n'.join(lines)
