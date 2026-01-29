@@ -664,8 +664,10 @@ try {
     psdOptions.layers = true;
     doc.saveAs(saveFile, psdOptions);
     
-    // 8. Save for Web as JPG
-    var jpgName = newName.replace(/\.psd$/i, '.jpg');
+    // 8. Save for Web as JPG (去除製作者後綴)
+    var jpgName = newName.replace(/\\.psd$/i, '.jpg');
+    // 移除製作者名稱後綴 (e.g., "_桁" from filename)
+    jpgName = jpgName.replace(/_[^_]+\\.jpg$/, '.jpg');
     var jpgFile = new File("OUTPUT_PATH_PLACEHOLDER/" + jpgName);
     
     var sfwOptions = new ExportOptionsSaveForWeb();
@@ -685,7 +687,25 @@ try {
     doc.close(SaveOptions.DONOTSAVECHANGES);
 
 } catch (e) {
-    alert("腳本執行時發生錯誤: " + e + "\\n\\n請確保Photoshop有足夠記憶體，並且PSD檔案沒有損壞。");
+    // 寫入錯誤標記文件，而不是彈出對話框
+    var errorFile = new File("OUTPUT_PATH_PLACEHOLDER/.error_log.txt");
+    var errorContent = "腳本執行失敗: " + e.toString() + "\\n\\n";
+    errorContent += "請確保 PSD 檔案有效，Photoshop 有足夠記憶體。";
+    
+    try {
+        if (errorFile.parent.exists) {
+            errorFile.open("w");
+            errorFile.write(errorContent);
+            errorFile.close();
+        }
+    } catch(fileErr) {}
+    
+    // 嘗試關閉文檔
+    try {
+        if (doc.isDirty) {
+            doc.close(SaveOptions.DONOTSAVECHANGES);
+        }
+    } catch(closeErr) {}
 }
 """
 
@@ -726,10 +746,11 @@ def main():
     """主程式"""
     parser = argparse.ArgumentParser(description="為晚報YT縮圖生成Photoshop腳本。 সন")
     parser.add_argument("--file", required=True, help="包含縮圖資訊的文字檔路徑。")
-    parser.add_argument("--color-id", help="要使用的顏色方案編號 (例如 B01, R02)。如果省略，將隨機選取一個。 সন")
+    parser.add_argument("--color-id", help="要使用的顏色方案編號 (例如 B01, R02)。如果省略，將隨機選取一個。 সน")
     parser.add_argument("--psd", default="晚報YT縮圖.psd", help="Photoshop範本檔案的路徑。 সন")
-    parser.add_argument("--csv", default="晚報變色.csv", help="顏色配置CSV檔案的路徑。 সन")
-    parser.add_argument("--output-dir", default=".", help="生成的JSX和PSD檔案的輸出目錄。 সন")
+    parser.add_argument("--csv", default="晚報變色.csv", help="顏色配置CSV檔案的路徑。 সน")
+    parser.add_argument("--jsx-output-dir", default=".", help="生成的JSX檔案輸出目錄。 សន")
+    parser.add_argument("--psd-output-dir", default=".", help="生成的PSD檔案輸出目錄。 សន")
     parser.add_argument("--creator", default="", help="製作者名稱，將附加在PSD檔案名後。 সन")
 
     args = parser.parse_args()
@@ -741,7 +762,7 @@ def main():
     print(f"\n正在載入顏色配置: {args.csv}")
     color_schemes = load_color_schemes(args.csv)
     if not color_schemes:
-        return
+        sys.exit(1)
 
     color_id = args.color_id
     if color_id:
@@ -759,16 +780,16 @@ def main():
     if not selected_scheme:
         print(f"錯誤: 在 {args.csv} 中找不到顏色ID '{color_id}'。 সন")
         print(f"可用ID: {', '.join(color_schemes.keys())}")
-        return
+        sys.exit(1)
     
     print(f"\n正在解析文字檔: {args.file}")
     if not os.path.exists(args.file):
         print(f"錯誤: 找不到輸入的文字檔: {args.file}")
-        return
+        sys.exit(1)
     result = parse_file(args.file)
     if not result:
         print("解析失敗")
-        return
+        sys.exit(1)
     
     print("\n解析結果:")
     print(f"  Slag: {result['slag']}")
@@ -776,9 +797,32 @@ def main():
     print(f"  第一行大標: {result['title_line1']}")
     print(f"  第二行大標: {result['title_line2']}")
     
+    # 驗證標題內容
+    title1_stripped = result['title_line1'].strip() if result['title_line1'] else ""
+    title2_stripped = result['title_line2'].strip() if result['title_line2'] else ""
+    
+    if not title1_stripped or not title2_stripped:
+        error_msg = f"標題內容不完整\n"
+        error_msg += f"- 第一行大標: '{result['title_line1']}' (空值)\n"
+        error_msg += f"- 第二行大標: '{result['title_line2']}' (空值)\n"
+        error_msg += f"請檢查文字檔內容是否正確"
+        
+        print(f"\n❌ 錯誤: {error_msg}")
+        
+        # 寫入錯誤日誌到 JSX 輸出目錄
+        try:
+            error_log_file = os.path.join(args.jsx_output_dir, f"error_{os.path.basename(args.file)}.log")
+            with open(error_log_file, 'w', encoding='utf-8') as f:
+                f.write(error_msg)
+            print(f"⚠ 錯誤日誌已保存: {error_log_file}")
+        except Exception as e:
+            print(f"⚠ 無法保存錯誤日誌: {e}")
+        
+        sys.exit(1)
+    
     if not os.path.exists(args.psd):
         print(f"\n錯誤: 找不到PSD檔案: {args.psd}")
-        return
+        sys.exit(1)
     
     selected_scheme['id'] = color_id
     
@@ -789,13 +833,15 @@ def main():
     if top_right_colors:
         top_right_selected = select_top_right_color(color_id, top_right_colors)
     
-    script_content = generate_jsx_script(result, selected_scheme, args.psd, args.output_dir, top_right_selected, args.creator)
+    # 使用 PSD 輸出目錄作為 JSX 中 Photoshop 輸出的位置
+    script_content = generate_jsx_script(result, selected_scheme, args.psd, args.psd_output_dir, top_right_selected, args.creator)
     
     mmdd = get_today_mmdd()
     # 使用檔名的雜湊來確保唯一性，防止同色ID的檔案互相覆蓋
     import hashlib
     slug_hash = hashlib.md5(result['slag'].encode()).hexdigest()[:6].upper()
-    script_file = os.path.join(args.output_dir, f"modify_thumbnail_{mmdd}_{color_id.upper()}_{slug_hash}.jsx")
+    # JSX 檔案存放在 JSX 輸出目錄
+    script_file = os.path.join(args.jsx_output_dir, f"modify_thumbnail_{mmdd}_{color_id.upper()}_{slug_hash}.jsx")
     with open(script_file, 'w', encoding='utf-8') as f:
         f.write(script_content)
     

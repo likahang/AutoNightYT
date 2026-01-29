@@ -115,7 +115,19 @@ def main():
     print(f"[3/5] 工作目錄: {script_dir}")
     print()
 
-    # 3.5 計算 PSD 輸出目錄
+    # 3.5 計算 JSX 輸出目錄（桌面的「晚報YT腳本」資料夾）
+    desktop_dir = os.path.expanduser("~\\Desktop")
+    jsx_output_dir = os.path.join(desktop_dir, "晚報YT腳本")
+    try:
+        os.makedirs(jsx_output_dir, exist_ok=True)
+        print(f"✓ JSX 輸出目錄: {jsx_output_dir}")
+    except Exception as e:
+        print(f"⚠ 無法建立 JSX 輸出目錄: {e}")
+        print(f"  將使用本地目錄替代")
+        jsx_output_dir = "."
+    print()
+
+    # 3.6 計算 PSD 輸出目錄
     psd_output_dir = f"\\\\10.227.58.117\\新聞psd\\{mmdd}\\縮圖"
     try:
         # 確保目錄存在
@@ -138,6 +150,8 @@ def main():
 
     # 為每個選中的檔案生成 JSX
     jsx_files_to_run = []
+    failed_files = []
+    has_errors = False  # 追踪是否有任何生成或執行錯誤
     
     for i, selected_file in enumerate(selected_files, 1):
         print(f"\n處理檔案 {i}/{len(selected_files)}: {os.path.basename(selected_file)}")
@@ -150,7 +164,8 @@ def main():
                     "--file", selected_file,
                     "--csv", "晚報變色.csv",
                     "--psd", "晚報YT縮圖.psd",
-                    "--output-dir", psd_output_dir,
+                    "--jsx-output-dir", jsx_output_dir,
+                    "--psd-output-dir", psd_output_dir,
                     "--creator", creator
                 ],
                 cwd=script_dir,
@@ -158,12 +173,14 @@ def main():
             )
 
             if result.returncode != 0:
-                print(f"❌ 檔案 {i} 的 Python 腳本執行失敗")
+                print(f"❌ 檔案 {i} 的 Python 腳本執行失敗，跳過此檔案")
+                failed_files.append(os.path.basename(selected_file))
+                has_errors = True  # 標記有錯誤發生
                 continue
             
-            # 找出剛生成的 JSX 檔案（在網路路徑中）
+            # 找出剛生成的 JSX 檔案（在 JSX 輸出目錄中）
             jsx_files = sorted(
-                glob.glob(os.path.join(psd_output_dir, "modify_thumbnail_*.jsx")),
+                glob.glob(os.path.join(jsx_output_dir, "modify_thumbnail_*.jsx")),
                 key=lambda x: os.path.getmtime(x),
                 reverse=True
             )
@@ -172,9 +189,15 @@ def main():
                 latest_jsx = jsx_files[0]
                 jsx_files_to_run.append(latest_jsx)
                 print(f"✓ 生成 JSX: {os.path.basename(latest_jsx)}")
+            else:
+                print(f"❌ 檔案 {i} 未能生成 JSX 檔案，跳過此檔案")
+                failed_files.append(os.path.basename(selected_file))
+                has_errors = True  # 標記有錯誤發生
                 
         except Exception as e:
-            print(f"❌ 處理檔案 {i} 時出錯: {e}")
+            print(f"❌ 處理檔案 {i} 時出錯: {e}，跳過此檔案")
+            failed_files.append(os.path.basename(selected_file))
+            has_errors = True  # 標記有錯誤發生
             continue
     
     print()
@@ -251,6 +274,7 @@ def main():
     # 依序執行每個 JSX 檔案，等待每個完成後才執行下一個
     template_psd = os.path.join(script_dir, "晚報YT縮圖.psd")
     generated_psds = []
+    skipped_files = []
     
     for i, jsx_path in enumerate(jsx_files_to_run, 1):
         print("=" * 50)
@@ -271,6 +295,7 @@ def main():
             print("✓ JSX 已發送至 Photoshop")
         except Exception as e:
             print(f"❌ 無法啟動: {e}")
+            skipped_files.append(os.path.basename(jsx_path))
             continue
         
         print()
@@ -281,13 +306,39 @@ def main():
         max_wait = 600
         wait_start = time.time()
         psd_found = False
+        error_occurred = False
         
         # 記錄執行前已存在的檔案（在輸出目錄中）
         files_before = set(glob.glob(os.path.join(psd_output_dir, "*.psd"))) | set(glob.glob(os.path.join(psd_output_dir, "*.jpg")))
+        error_log_path = os.path.join(psd_output_dir, ".error_log.txt")
         
         while time.time() - wait_start < max_wait:
             time.sleep(2)
             elapsed = int(time.time() - wait_start)
+            
+            # 檢查是否有錯誤日誌文件
+            if os.path.exists(error_log_path):
+                try:
+                    with open(error_log_path, 'r', encoding='utf-8') as f:
+                        error_msg = f.read()
+                    print(f"\n❌ Photoshop 執行失敗: {error_msg}")
+                    error_occurred = True
+                    has_errors = True  # 標記有錯誤發生
+                    # 將錯誤日誌複製到 JSX 資料夾保存
+                    try:
+                        error_log_backup = os.path.join(jsx_output_dir, f"error_{os.path.basename(jsx_path)}.log")
+                        with open(error_log_backup, 'w', encoding='utf-8') as f:
+                            f.write(error_msg)
+                    except:
+                        pass
+                    # 刪除原始錯誤文件
+                    try:
+                        os.remove(error_log_path)
+                    except:
+                        pass
+                    break
+                except:
+                    pass
             
             # 檢查是否生成了新的檔案（在輸出目錄中）
             all_files = glob.glob(os.path.join(psd_output_dir, "*.psd")) + glob.glob(os.path.join(psd_output_dir, "*.jpg"))
@@ -311,8 +362,26 @@ def main():
         
         print()
         
-        if not psd_found:
-            print(f"⚠ 檔案 {i} 在規定時間內未能生成 PSD")
+        if error_occurred:
+            print(f"⚠ 檔案 {i} 執行失敗，跳過此檔案繼續下一個")
+            skipped_files.append(os.path.basename(jsx_path))
+            has_errors = True  # 標記有錯誤發生
+            # 強制關閉 Photoshop
+            try:
+                os.system("taskkill /IM Photoshop.exe /F")
+                time.sleep(2)
+            except:
+                pass
+        elif not psd_found:
+            print(f"⚠ 檔案 {i} 在規定時間內未能生成 PSD，跳過此檔案繼續下一個")
+            skipped_files.append(os.path.basename(jsx_path))
+            has_errors = True  # 標記有錯誤發生
+            # 強制關閉 Photoshop，以防它卡住或打開了 PSD
+            try:
+                os.system("taskkill /IM Photoshop.exe /F")
+                time.sleep(2)
+            except:
+                pass
         else:
             print(f"✓ 檔案 {i} 已完成，準備執行下一個...")
         
@@ -320,11 +389,11 @@ def main():
     
     print()
     print("=" * 50)
-    print("✓ 所有檔案已處理完成！")
+    print("✓ 批次處理完成！")
     print("=" * 50)
     print()
     
-    # 刪除所有 JSX 檔案
+    # 清理暫存檔案
     print("清理暫存檔案...")
     deleted_count = 0
     for jsx_path in jsx_files_to_run:
@@ -336,25 +405,50 @@ def main():
             print(f"⚠ 刪除 {os.path.basename(jsx_path)} 時出錯: {e}")
     
     print(f"✓ 已刪除 {deleted_count} 個 JSX 檔案")
+    
+    # 根據是否有錯誤決定是否刪除 JSX 資料夾
+    if not has_errors:
+        # 沒有錯誤，清理整個 JSX 資料夾
+        try:
+            import shutil
+            if os.path.exists(jsx_output_dir) and jsx_output_dir != ".":
+                shutil.rmtree(jsx_output_dir)
+                print(f"✓ 已清理 JSX 資料夾: {jsx_output_dir}")
+        except Exception as e:
+            print(f"⚠ 無法清理 JSX 資料夾: {e}")
+    else:
+        # 有錯誤，保留 JSX 資料夾（用於保存錯誤日誌）
+        print(f"✓ 保留 JSX 資料夾（包含錯誤日誌）: {jsx_output_dir}")
 
     print()
+    print("=" * 50)
+    print("📊 處理結果統計")
+    print("=" * 50)
+    print(f"✓ 成功生成: {len(generated_psds)} 個檔案")
+    if failed_files:
+        print(f"❌ 生成失敗: {len(failed_files)} 個檔案")
+        for fname in failed_files:
+            print(f"  - {fname}")
+    if skipped_files:
+        print(f"⏭️  超時跳過: {len(skipped_files)} 個檔案")
+        for fname in skipped_files:
+            print(f"  - {fname}")
+    print()
     
-    if len(generated_psds) >= len(jsx_files_to_run):
-        print("=" * 50)
-        print("✓ 完成！")
-        print(f"已成功生成 {len(generated_psds)} 個 PSD 檔案：")
+    if len(generated_psds) > 0:
+        print("已成功生成的檔案：")
         for psd_path in sorted(generated_psds):
             print(f"  - {os.path.basename(psd_path)}")
+        print()
+        print("=" * 50)
+        print("✓ 完成！")
         print("=" * 50)
         print()
         print("程式將自動關閉...")
         time.sleep(2)
         sys.exit(0)
     else:
-        print("⚠ 未在規定時間內檢測到 PSD 檔案生成")
-        print("可能的原因:")
-        print("- Photoshop 未執行腳本")
-        print("- 腳本執行失敗")
+        print("❌ 未能生成任何 PSD 檔案")
         print()
         input("按 Enter 鍵結束")
 
