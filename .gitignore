@@ -18,3 +18,10 @@ modify_thumbnail_*.jsx
 
 # Reference images folder
 參考/
+
+# Build artifacts
+*.exe
+/dist/
+/build/
+build_log*.txt
+*.spec

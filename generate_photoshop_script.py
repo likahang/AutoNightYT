@@ -130,6 +130,7 @@ def generate_jsx_script(result_data, color_scheme, psd_path, output_path, top_ri
     mmdd = get_today_mmdd()
     
     def sanitize_filename(filename):
+        # 替換 Windows 非法字元 (保留 %, 因為我們會透過 JSX 處理它的路徑編碼問題)
         invalid_chars = r'[<>:"/\\|?*]'
         filename = re.sub(invalid_chars, '_', filename)
         filename = filename.strip('. ')
@@ -138,10 +139,51 @@ def generate_jsx_script(result_data, color_scheme, psd_path, output_path, top_ri
             filename = filename[:200]
         return filename
     
+    # 強制檢測製作者：如果 creator 為空，嘗試從現有 PSD 檔案中尋找
+    import glob
+    if (not creator or not creator.strip()) and os.path.exists(output_path):
+        # 構造搜尋樣式: MMDD_Slag_*.psd
+        # 先計算不含製作者的基本部分
+        base_slug = f"{mmdd}_{result_data['slag']}"
+        # 為了安全起見，我們只 sanitize Slag 部分
+        sanitized_slag = sanitize_filename(result_data['slag'])
+        # 這裡有個微妙之處：sanitize_filename 可能會把 "_" 也做為連接符
+        # 我們假設 sanitize_filename(f"{mmdd}_{slag}_xxx.psd") 
+        # 等同於 f"{mmdd}_{sanitize_filename(slag)}_xxx.psd" 
+        # 但 sanitize_filename 會把特殊字元變 "_"
+        
+        # 讓我們使用更寬鬆的glob: output_path/mmdd_slag_*.psd
+        # 考慮到 slag 可能含有特殊字符，我們先用 sanitize 過的版本來搜尋
+        search_pattern = os.path.join(output_path, f"{mmdd}_{sanitized_slag}_*.psd")
+        
+        # Windows 路徑可能需要轉義 glob
+        found_files = glob.glob(search_pattern)
+        
+        # 過濾掉不符合格式的檔案 (例如 0130_Title.psd 沒有後綴)
+        candidates = []
+        base_prefix = f"{mmdd}_{sanitized_slag}_"
+        for f_path in found_files:
+            f_name = os.path.basename(f_path)
+            # 檢查是否確實以 prefix 開頭並且以 .psd 結尾
+            if f_name.startswith(base_prefix) and f_name.lower().endswith('.psd'):
+                # 提取中間的部分
+                suffix_part = f_name[len(base_prefix):-4] # 去掉 .psd
+                if suffix_part:
+                    candidates.append((f_path, suffix_part))
+        
+        if candidates:
+            # 如果有多個，取修改時間最新的
+            candidates.sort(key=lambda x: os.path.getmtime(x[0]), reverse=True)
+            detected_creator = candidates[0][1]
+            print(f"✓ 自動偵測到現有製作者: {detected_creator}")
+            creator = detected_creator
+
     # 添加製作者到檔名
     creator_suffix = ""
+    has_creator = "false"
     if creator and creator.strip() != "":
         creator_suffix = f"_{creator.strip()}"
+        has_creator = "true"
     
     new_filename = sanitize_filename(f"{mmdd}_{result_data['slag']}{creator_suffix}.psd")
     
@@ -189,7 +231,14 @@ def generate_jsx_script(result_data, color_scheme, psd_path, output_path, top_ri
     line2_colors = color_scheme["line2"]
 
     psd_path_escaped = os.path.abspath(psd_path).replace(os.sep, '/')
-    output_path_escaped = os.path.abspath(output_path).replace(os.sep, '/')
+    
+    # 網絡路徑處理：\\IP\share -> //IP/share (ExtendScript UNC 路徑)
+    if output_path.startswith('\\\\'):
+        # \\10.227.58.117\新聞psd\0129\縮圖 -> //10.227.58.117/新聞psd/0129/縮圖
+        output_path_escaped = '//' + output_path[2:].replace('\\', '/')
+    else:
+        output_path_escaped = output_path.replace('\\', '/')
+    
     gen_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     # Define static parts of the script as regular strings
@@ -656,19 +705,92 @@ try {
     }
 
     // 7. Save File and Close
-    var saveFile = new File("OUTPUT_PATH_PLACEHOLDER/" + newName);
-    if (!saveFile.parent.exists) saveFile.parent.create();
+    // 使用 Folder 對象來處理 UNC 路徑，避免中文字符編碼問題
+    var outputFolder = new Folder("OUTPUT_PATH_PLACEHOLDER");
+    var fallbackFolder = null;
+    
+    if (!outputFolder.exists) {
+        // 嘗試創建輸出文件夾
+        var parentFolder = new Folder(outputFolder.parent);
+        if (!parentFolder.exists) {
+            try {
+                parentFolder.create();
+            } catch(e) {
+                // 父文件夾創建失敗，記錄錯誤
+                var logFile = new File(Folder.desktop + "/error_create_parent.txt");
+                logFile.open("w");
+                logFile.write("無法創建父文件夾: " + outputFolder.parent + "\\n錯誤: " + e.toString());
+                logFile.close();
+            }
+        }
+        try {
+            outputFolder.create();
+        } catch(e) {
+            // 輸出文件夾創建失敗，使用本地桌面作為備用
+            fallbackFolder = Folder.desktop;
+            var logFile = new File(Folder.desktop + "/error_create_output.txt");
+            logFile.open("w");
+            logFile.write("無法創建輸出文件夾: " + outputFolder.toString() + "\\n錯誤: " + e.toString() + "\\n使用備用文件夾: " + fallbackFolder);
+            logFile.close();
+        }
+    }
+    
+    var actualFolder = outputFolder.exists ? outputFolder : fallbackFolder;
+    if (!actualFolder) {
+        actualFolder = Folder.desktop;
+    }
+    
+    // 處理檔名中的 % 符號 (替換為 %25 以避免被解析為轉義字符)
+    var safeNameForPath = newName.replace(/%/g, "%25");
+    var saveFile = new File(actualFolder.toString() + "/" + safeNameForPath);
+    
     var psdOptions = new PhotoshopSaveOptions();
     psdOptions.embedColorProfile = true;
     psdOptions.alphaChannels = true;
     psdOptions.layers = true;
-    doc.saveAs(saveFile, psdOptions);
+    
+    // 禁用所有對話框 (強制覆蓋)
+    app.displayDialogs = DialogModes.NO;
+    
+    try {
+        doc.saveAs(saveFile, psdOptions, true); // true = asCopy (but here we want to overwrite)
+        // 實際上 EXTENSION SCRIPT 的 saveAs 若檔案存在會直接覆蓋，但在某些版本可能會跳出詢問
+        // 正確的寫法是不要指定 asCopy，但要確保 displayDialogs = NO
+    } catch(e) {
+        // 如果第一次存檔失敗，嘗試先刪除舊檔案
+        try {
+            if (saveFile.exists) {
+                saveFile.remove();
+                doc.saveAs(saveFile, psdOptions, true);
+            } else {
+                throw e;
+            }
+        } catch(e2) {
+            alert("保存 PSD 檔案失敗: " + saveFile + " 錯誤: " + e2.toString());
+        }
+    }
     
     // 8. Save for Web as JPG (去除製作者後綴)
-    var jpgName = newName.replace(/\\.psd$/i, '.jpg');
-    // 移除製作者名稱後綴 (e.g., "_桁" from filename)
-    jpgName = jpgName.replace(/_[^_]+\\.jpg$/, '.jpg');
-    var jpgFile = new File("OUTPUT_PATH_PLACEHOLDER/" + jpgName);
+    // 創建 JPG 子資料夾
+    var jpgFolder = new Folder(actualFolder.toString() + "/JPG");
+    if (!jpgFolder.exists) {
+        jpgFolder.create();
+    }
+
+    var jpgName = newName.replace(/\.psd$/i, '.jpg');
+    
+    // 只有在有製作者後綴時，才嘗試移除最後一段 (避免變成 0130.jpg)
+    // HAS_CREATOR_PLACEHOLDER
+    var hasCreator = HAS_CREATOR_PLACEHOLDER;
+    
+    if (hasCreator) {
+        // 移除製作者名稱後綴 (e.g., "_桁" from filename)
+        jpgName = jpgName.replace(/_[^_]+\.jpg$/, '.jpg');
+    }
+    
+    // 同樣需要處理 jpg 檔名中的 %
+    var safeJpgNameForPath = jpgName.replace(/%/g, "%25");
+    var jpgFile = new File(jpgFolder.toString() + "/" + safeJpgNameForPath);
     
     var sfwOptions = new ExportOptionsSaveForWeb();
     sfwOptions.format = SaveDocumentType.JPEG;
@@ -678,31 +800,43 @@ try {
     sfwOptions.quality = 60;
     
     // 清理記憶體並執行垃圾回收
-    try { 
-        app.purge(); 
+    try {
+        app.purge();
     } catch(e) {}
     
-    doc.exportDocument(jpgFile, ExportType.SAVEFORWEB, sfwOptions);
-    
+    try {
+        doc.exportDocument(jpgFile, ExportType.SAVEFORWEB, sfwOptions);
+    } catch(e) {
+        alert("導出 JPG 檔案失敗: " + jpgFile + " 錯誤: " + e.toString());
+    }
     doc.close(SaveOptions.DONOTSAVECHANGES);
 
 } catch (e) {
-    // 寫入錯誤標記文件，而不是彈出對話框
-    var errorFile = new File("OUTPUT_PATH_PLACEHOLDER/.error_log.txt");
+    // 寫入錯誤標記文件到本地桌面目錄（而不是網絡路徑）
+    var desktopFolder = Folder.desktop;
+    var scriptFolder = new Folder(desktopFolder.toString() + "/晚報YT腳本");
+    if (!scriptFolder.exists) {
+        scriptFolder.create();
+    }
+    
+    var errorFileName = "error_" + new Date().getTime() + ".txt";
+    var errorFile = new File(scriptFolder.toString() + "/" + errorFileName);
     var errorContent = "腳本執行失敗: " + e.toString() + "\\n\\n";
-    errorContent += "請確保 PSD 檔案有效，Photoshop 有足夠記憶體。";
+    errorContent += "請確保 PSD 檔案有效，Photoshop 有足夠記憶體。\\n";
+    errorContent += "輸出路徑: OUTPUT_PATH_PLACEHOLDER\\n";
+    errorContent += "新檔名: NEW_FILENAME_PLACEHOLDER";
     
     try {
-        if (errorFile.parent.exists) {
-            errorFile.open("w");
-            errorFile.write(errorContent);
-            errorFile.close();
-        }
-    } catch(fileErr) {}
+        errorFile.open("w");
+        errorFile.write(errorContent);
+        errorFile.close();
+    } catch(fileErr) {
+        // 即使本地寫入失敗也不要彈出對話框
+    }
     
     // 嘗試關閉文檔
     try {
-        if (doc.isDirty) {
+        if (doc != null && doc.isDirty) {
             doc.close(SaveOptions.DONOTSAVECHANGES);
         }
     } catch(closeErr) {}
@@ -732,7 +866,8 @@ try {
         "ANCHOR_NAME_PLACEHOLDER": anchor_name,
         "EXPLOSION_COLOR": line1_colors['explosion'],
         "TOP_RIGHT_COLOR": top_right_color if top_right_color else "ffffff",
-        "OUTPUT_PATH_PLACEHOLDER": output_path_escaped
+        "OUTPUT_PATH_PLACEHOLDER": output_path_escaped,
+        "HAS_CREATOR_PLACEHOLDER": has_creator
     }
     
     jsx_main = jsx_main_template
@@ -742,54 +877,50 @@ try {
     return (jsx_header + jsx_helpers + jsx_main).strip()
 
 
-def main():
-    """主程式"""
-    parser = argparse.ArgumentParser(description="為晚報YT縮圖生成Photoshop腳本。 সন")
-    parser.add_argument("--file", required=True, help="包含縮圖資訊的文字檔路徑。")
-    parser.add_argument("--color-id", help="要使用的顏色方案編號 (例如 B01, R02)。如果省略，將隨機選取一個。 সน")
-    parser.add_argument("--psd", default="晚報YT縮圖.psd", help="Photoshop範本檔案的路徑。 সন")
-    parser.add_argument("--csv", default="晚報變色.csv", help="顏色配置CSV檔案的路徑。 সน")
-    parser.add_argument("--jsx-output-dir", default=".", help="生成的JSX檔案輸出目錄。 សន")
-    parser.add_argument("--psd-output-dir", default=".", help="生成的PSD檔案輸出目錄。 សន")
-    parser.add_argument("--creator", default="", help="製作者名稱，將附加在PSD檔案名後。 সन")
-
-    args = parser.parse_args()
-
+def run_generation_logic(file_path, color_id, psd_path, csv_path, jsx_output_dir, psd_output_dir, creator):
+    """執生成邏輯，方便外部調用"""
+    
+    # 確保路徑是絕對路徑
+    file_path = os.path.abspath(file_path)
+    psd_path = os.path.abspath(psd_path)
+    csv_path = os.path.abspath(csv_path)
+    jsx_output_dir = os.path.abspath(jsx_output_dir)
+    # psd_output_dir 可以是網絡路徑，不一定要轉為本地絕對路徑
+    
     print("="*60)
     print("生成Photoshop腳本")
     print("="*60)
 
-    print(f"\n正在載入顏色配置: {args.csv}")
-    color_schemes = load_color_schemes(args.csv)
+    print(f"\n正在載入顏色配置: {csv_path}")
+    color_schemes = load_color_schemes(csv_path)
     if not color_schemes:
-        sys.exit(1)
+        return 1
 
-    color_id = args.color_id
     if color_id:
         color_id = color_id.upper()
         print(f"✓ 使用指定的顏色ID: {color_id}")
     else:
         available_ids = list(color_schemes.keys())
         if not available_ids:
-            print("錯誤: 顏色設定檔中沒有可用的顏色ID。 সন")
-            return
+            print("錯誤: 顏色設定檔中沒有可用的顏色ID。")
+            return 1
         color_id = random.choice(available_ids)
         print(f"✓ 未指定顏色ID，隨機選取: {color_id}")
 
     selected_scheme = color_schemes.get(color_id)
     if not selected_scheme:
-        print(f"錯誤: 在 {args.csv} 中找不到顏色ID '{color_id}'。 সন")
+        print(f"錯誤: 在 {csv_path} 中找不到顏色ID '{color_id}'。")
         print(f"可用ID: {', '.join(color_schemes.keys())}")
-        sys.exit(1)
+        return 1
     
-    print(f"\n正在解析文字檔: {args.file}")
-    if not os.path.exists(args.file):
-        print(f"錯誤: 找不到輸入的文字檔: {args.file}")
-        sys.exit(1)
-    result = parse_file(args.file)
+    print(f"\n正在解析文字檔: {file_path}")
+    if not os.path.exists(file_path):
+        print(f"錯誤: 找不到輸入的文字檔: {file_path}")
+        return 1
+    result = parse_file(file_path)
     if not result:
         print("解析失敗")
-        sys.exit(1)
+        return 1
     
     print("\n解析結果:")
     print(f"  Slag: {result['slag']}")
@@ -811,53 +942,83 @@ def main():
         
         # 寫入錯誤日誌到 JSX 輸出目錄
         try:
-            error_log_file = os.path.join(args.jsx_output_dir, f"error_{os.path.basename(args.file)}.log")
+            if not os.path.exists(jsx_output_dir):
+                os.makedirs(jsx_output_dir, exist_ok=True)
+                
+            error_log_file = os.path.join(jsx_output_dir, f"error_{os.path.basename(file_path)}.log")
             with open(error_log_file, 'w', encoding='utf-8') as f:
                 f.write(error_msg)
             print(f"⚠ 錯誤日誌已保存: {error_log_file}")
         except Exception as e:
             print(f"⚠ 無法保存錯誤日誌: {e}")
         
-        sys.exit(1)
+        return 1
     
-    if not os.path.exists(args.psd):
-        print(f"\n錯誤: 找不到PSD檔案: {args.psd}")
-        sys.exit(1)
+    if not os.path.exists(psd_path):
+        print(f"\n錯誤: 找不到PSD檔案: {psd_path}")
+        return 1
     
     selected_scheme['id'] = color_id
     
     # 載入右上變色方案
     print(f"\n正在載入右上變色配置...")
-    top_right_colors = load_top_right_colors('右上變色.csv')
+    top_right_csv = os.path.join(os.path.dirname(csv_path), '右上變色.csv')
+    # 如果找不到，嘗試在同目錄找
+    if not os.path.exists(top_right_csv):
+         top_right_csv = '右上變色.csv'
+         
+    top_right_colors = load_top_right_colors(top_right_csv)
     top_right_selected = None
     if top_right_colors:
         top_right_selected = select_top_right_color(color_id, top_right_colors)
     
-    # 使用 PSD 輸出目錄作為 JSX 中 Photoshop 輸出的位置
-    script_content = generate_jsx_script(result, selected_scheme, args.psd, args.psd_output_dir, top_right_selected, args.creator)
+    # 使用 PSD 輸出目錄作為 JSX 中 Photoshop 的輸出位置
+    script_content = generate_jsx_script(result, selected_scheme, psd_path, psd_output_dir, top_right_selected, creator)
     
     mmdd = get_today_mmdd()
-    # 使用檔名的雜湊來確保唯一性，防止同色ID的檔案互相覆蓋
+    
     import hashlib
     slug_hash = hashlib.md5(result['slag'].encode()).hexdigest()[:6].upper()
-    # JSX 檔案存放在 JSX 輸出目錄
-    script_file = os.path.join(args.jsx_output_dir, f"modify_thumbnail_{mmdd}_{color_id.upper()}_{slug_hash}.jsx")
-    with open(script_file, 'w', encoding='utf-8') as f:
-        f.write(script_content)
+    
+    if not os.path.exists(jsx_output_dir):
+        os.makedirs(jsx_output_dir, exist_ok=True)
+
+    script_file = os.path.join(jsx_output_dir, f"modify_thumbnail_{mmdd}_{color_id.upper()}_{slug_hash}.jsx")
+    
+    try:
+        with open(script_file, 'w', encoding='utf-8') as f:
+            f.write(script_content)
+    except Exception as e:
+        print(f"無法寫入 JSX 文件: {e}")
+        return 1
     
     print(f"\n✓ Photoshop腳本已生成: {script_file}")
-    print(f"\n使用方式:")
-    print(f"  1. 確保 '{args.psd}' 檔案存在於指定位置。 সন")
-    print(f"  2. 雙擊 {os.path.abspath(script_file)} 直接執行。 সন")
-    print(f"  或")
-    print(f"  2. 在Photoshop中選擇 檔案 > 腳本 > 瀏覽... সন")
-    print(f"  3. 選擇 {os.path.abspath(script_file)}")
-    print(f"\n腳本會自動:")
-    print(f"  - 啟動/切換到Photoshop")
-    print(f"  - 開啟PSD檔案")
-    print(f"  - 執行所有修改")
-    print(f"  - 另存新檔並關閉原檔案")
-    print(f"\n注意: 如果遇到顯示空間不足的錯誤，請確保螢幕解析度足夠或將Photoshop視窗最大化。")
+    
+    return 0
+
+
+def main():
+    """主程式"""
+    parser = argparse.ArgumentParser(description="為晚報YT縮圖生成Photoshop腳本。")
+    parser.add_argument("--file", required=True, help="包含縮圖資訊的文字檔路徑。")
+    parser.add_argument("--color-id", help="要使用的顏色方案編號 (例如 B01, R02)。如果省略，將隨機選取一個。")
+    parser.add_argument("--psd", default="晚報YT縮圖.psd", help="Photoshop範本檔案的路徑。")
+    parser.add_argument("--csv", default="晚報變色.csv", help="顏色配置CSV檔案的路徑。")
+    parser.add_argument("--jsx-output-dir", default=".", help="生成的JSX檔案輸出目錄。")
+    parser.add_argument("--psd-output-dir", default=".", help="生成的PSD檔案輸出目錄。")
+    parser.add_argument("--creator", default="", help="製作者名稱，將附加在PSD檔案名後。")
+
+    args = parser.parse_args()
+
+    sys.exit(run_generation_logic(
+        args.file,
+        args.color_id,
+        args.psd,
+        args.csv,
+        args.jsx_output_dir,
+        args.psd_output_dir,
+        args.creator
+    ))
 
 
 if __name__ == "__main__":

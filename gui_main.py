@@ -1,0 +1,1185 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+自動縮圖生成系統 - GUI 主程序
+Modern Dark Mode with Neon Accent Colors
+"""
+
+import sys
+import os
+import json
+from worker import GenerationWorker
+import re
+from datetime import datetime
+from pathlib import Path
+from functools import partial
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
+    QTextEdit, QSplitter, QCheckBox, QSpinBox, QComboBox,
+    QScrollArea, QFrame, QProgressBar, QMenuBar, QMenu, QMessageBox,
+    QFileDialog, QGridLayout
+)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
+from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QCursor, QPainter
+from PyQt6.QtCore import QSize
+import subprocess
+import glob
+
+# ===== 配色方案 =====
+class DarkTheme:
+    # 主色調
+    BG_PRIMARY = "#1e1e2e"      # 深炭灰色背景
+    BG_SECONDARY = "#2a2a3e"    # 稍淺的背景
+    BG_TERTIARY = "#32323f"     # 更淺的背景
+    
+    # 強調色（霓虹色系）
+    ACCENT_PINK = "#FF006E"     # 霓虹粉
+    ACCENT_CYAN = "#00D9FF"     # 霓虹青
+    ACCENT_PURPLE = "#B537F2"   # 亮紫
+    ACCENT_GREEN = "#00FF41"    # 霓虹綠（成功）
+    ACCENT_RED = "#FF0055"      # 霓虹紅（錯誤）
+    ACCENT_ORANGE = "#FFB000"   # 霓虹橙（警告）
+    
+    # 文本顏色
+    TEXT_PRIMARY = "#E0E0E0"    # 主文本
+    TEXT_SECONDARY = "#A0A0A0"  # 次要文本
+    TEXT_HINT = "#707070"       # 提示文本
+    
+    # 邊框
+    BORDER = "#4a4a5e"          # 邊框顏色
+
+# ===== 樣式表 =====
+STYLESHEET = f"""
+QMainWindow {{
+    background-color: {DarkTheme.BG_PRIMARY};
+    color: {DarkTheme.TEXT_PRIMARY};
+}}
+
+QWidget {{
+    background-color: {DarkTheme.BG_PRIMARY};
+    color: {DarkTheme.TEXT_PRIMARY};
+}}
+
+QLabel {{
+    color: {DarkTheme.TEXT_PRIMARY};
+}}
+
+QLineEdit {{
+    background-color: {DarkTheme.BG_SECONDARY};
+    color: {DarkTheme.TEXT_PRIMARY};
+    border: 1px solid {DarkTheme.BORDER};
+    border-radius: 5px;
+    padding: 5px;
+    font-size: 11pt;
+}}
+
+QLineEdit:focus {{
+    border: 2px solid {DarkTheme.ACCENT_CYAN};
+}}
+
+QPushButton {{
+    background-color: {DarkTheme.ACCENT_PINK};
+    color: white;
+    border: none;
+    border-radius: 5px;
+    padding: 8px 16px;
+    font-weight: bold;
+    font-size: 11pt;
+}}
+
+QPushButton:hover {{
+    background-color: {DarkTheme.ACCENT_PURPLE};
+}}
+
+QPushButton:pressed {{
+    background-color: {DarkTheme.ACCENT_RED};
+}}
+
+QPushButton:disabled {{
+    background-color: {DarkTheme.BG_TERTIARY};
+    color: {DarkTheme.TEXT_HINT};
+}}
+
+QListWidget {{
+    background-color: {DarkTheme.BG_SECONDARY};
+    color: {DarkTheme.TEXT_PRIMARY};
+    border: 1px solid {DarkTheme.BORDER};
+    border-radius: 5px;
+}}
+
+QListWidget::item:selected {{
+    background-color: {DarkTheme.ACCENT_CYAN};
+    color: {DarkTheme.BG_PRIMARY};
+}}
+
+QListWidget::item:hover {{
+    background-color: {DarkTheme.ACCENT_PURPLE};
+    color: white;
+}}
+
+QTextEdit {{
+    background-color: {DarkTheme.BG_SECONDARY};
+    color: {DarkTheme.TEXT_PRIMARY};
+    border: 1px solid {DarkTheme.BORDER};
+    border-radius: 5px;
+    font-family: 'Courier New';
+    font-size: 10pt;
+}}
+
+QFrame {{
+    background-color: {DarkTheme.BG_SECONDARY};
+    border: 1px solid {DarkTheme.BORDER};
+    border-radius: 5px;
+}}
+
+QProgressBar {{
+    background-color: {DarkTheme.BG_TERTIARY};
+    border: 1px solid {DarkTheme.BORDER};
+    border-radius: 5px;
+    height: 20px;
+}}
+
+QProgressBar::chunk {{
+    background-color: {DarkTheme.ACCENT_GREEN};
+    border-radius: 3px;
+}}
+
+QCheckBox {{
+    color: {DarkTheme.TEXT_PRIMARY};
+}}
+
+QCheckBox::indicator:unchecked {{
+    background-color: {DarkTheme.BG_TERTIARY};
+    border: 1px solid {DarkTheme.BORDER};
+    border-radius: 3px;
+}}
+
+QCheckBox::indicator:checked {{
+    background-color: {DarkTheme.ACCENT_CYAN};
+    border: 1px solid {DarkTheme.ACCENT_CYAN};
+    border-radius: 3px;
+}}
+
+QScrollBar:vertical {{
+    background-color: {DarkTheme.BG_SECONDARY};
+    width: 12px;
+}}
+
+QScrollBar::handle:vertical {{
+    background-color: {DarkTheme.BORDER};
+    border-radius: 6px;
+    min-height: 20px;
+}}
+
+QScrollBar::handle:vertical:hover {{
+    background-color: {DarkTheme.ACCENT_PINK};
+}}
+
+QMenuBar {{
+    background-color: {DarkTheme.BG_SECONDARY};
+    color: {DarkTheme.TEXT_PRIMARY};
+    border-bottom: 1px solid {DarkTheme.BORDER};
+}}
+
+QMenuBar::item:selected {{
+    background-color: {DarkTheme.ACCENT_PURPLE};
+}}
+
+QMenu {{
+    background-color: {DarkTheme.BG_SECONDARY};
+    color: {DarkTheme.TEXT_PRIMARY};
+    border: 1px solid {DarkTheme.BORDER};
+}}
+
+QMenu::item:selected {{
+    background-color: {DarkTheme.ACCENT_CYAN};
+    color: {DarkTheme.BG_PRIMARY};
+}}
+"""
+
+
+# ===== 自訂排序函數 =====
+def extract_numbers_for_sort(filename):
+    """從檔名提取所有數字用於排序"""
+    # 從檔名中提取所有數字，轉換為整數列表用於排序
+    numbers = re.findall(r'\d+', filename)
+    # 返回包含數字的元組，便於比較
+    # 例如: "1800晚報YT縮周2..." -> (1800, 2)
+    return tuple(int(n) for n in numbers) if numbers else (0,)
+
+def sanitize_filename_part(text):
+    """單獨淨化檔名的一部分 (Slag)，模擬生成腳本的行為"""
+    # 替換 Windows 非法字元
+    invalid_chars = r'[<>:"/\\|?*]'
+    text = re.sub(invalid_chars, '_', text)
+    text = text.strip() # 去除前後空白
+    text = re.sub(r'__+', '_', text) # 合併底線
+    return text
+
+def normalize_string_for_compare(text):
+    """標準化字串用於比較 (移除所有空白、底線、橫線)"""
+    return re.sub(r'[\s_\-]', '', text).lower()
+
+class FileListWidget(QListWidget):
+    """自訂文件列表小部件"""
+    def __init__(self):
+        super().__init__()
+        self.setSelectionMode(self.SelectionMode.MultiSelection)
+        self.item_checked = {}  # 記錄勾選狀態
+        
+    def add_file(self, filename):
+        """添加文件到列表"""
+        item = QListWidgetItem()
+        item.setText(f"☐ {filename}")
+        item.setData(Qt.ItemDataRole.UserRole, filename)
+        self.addItem(item)
+        self.item_checked[filename] = False
+        
+    def get_checked_files(self):
+        """獲取所有勾選的文件"""
+        checked = []
+        for filename, is_checked in self.item_checked.items():
+            if is_checked:
+                checked.append(filename)
+        return checked
+    
+    def toggle_all(self):
+        """全選/全不選"""
+        # 檢查是否已經全部被選中
+        all_checked = all(self.item_checked.values())
+        
+        # 如果全部已選，則全不選；否則全選
+        new_state = not all_checked
+        
+        for filename in self.item_checked:
+            self.item_checked[filename] = new_state
+        self.update_display()
+    
+    def refresh_list(self):
+        """反向切換選擇 (保留方法名) 或 刷新列表"""
+        pass # 由外部控制
+    
+    def update_display(self):
+        """更新顯示"""
+        for i in range(self.count()):
+            item = self.item(i)
+            filename = item.data(Qt.ItemDataRole.UserRole)
+            is_checked = self.item_checked.get(filename, False)
+            checkbox_symbol = "☑" if is_checked else "☐"
+            item.setText(f"{checkbox_symbol} {filename}")
+    
+    def mousePressEvent(self, event):
+        """滑鼠點擊時切換勾選狀態"""
+        item = self.itemAt(event.pos())
+        if item:
+            filename = item.data(Qt.ItemDataRole.UserRole)
+            self.item_checked[filename] = not self.item_checked[filename]
+            self.update_display()
+        super().mousePressEvent(event)
+
+
+class AspectRatioLabel(QLabel):
+    """保持寬高比的標籤"""
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setMinimumSize(1, 1)
+        self.setScaledContents(False)
+        from PyQt6.QtWidgets import QSizePolicy
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.original_pixmap = None
+
+    def setPixmap(self, p):
+        self.original_pixmap = p
+        self.update()
+
+    def setText(self, text):
+        self.original_pixmap = None
+        super().setText(text)
+    
+    def hasHeightForWidth(self):
+        """告訴 Layout 系統我們有基於寬度的高度計算"""
+        return True
+
+    def heightForWidth(self, width):
+        """計算保持 16:9 的高度"""
+        return int(width * 9 / 16)
+        
+    def paintEvent(self, event):
+        if self.original_pixmap and not self.original_pixmap.isNull():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            
+            # 使用我們計算好的尺寸 (Label 自身的尺寸已經由 Layout 根據 heightForWidth 設定好了)
+            target_size = self.size()
+            
+            # 確保圖片以 "Crop to Fill" 方式繪製，或者乾脆縮放
+            # 如果 Label 已經是 16:9，那麼 KeepAspectRatio 就會填滿
+            scaled = self.original_pixmap.scaled(
+                target_size, 
+                Qt.AspectRatioMode.KeepAspectRatio, 
+                Qt.TransformationMode.SmoothTransformation
+            )
+            
+            # 計算居中位置 (以防萬一有誤差)
+            x = (self.width() - scaled.width()) // 2
+            y = (self.height() - scaled.height()) // 2
+            
+            painter.drawPixmap(x, y, scaled)
+        else:
+            super().paintEvent(event)
+
+
+class ThumbnailGridWidget(QWidget):
+    """縮圖網格展示小部件（4 列排列）"""
+    # 信號：重新處理請求
+    reprocess_requested = pyqtSignal(str)  # (filename)
+    
+    def __init__(self, parent_window=None):
+        super().__init__()
+        self.parent_window = parent_window
+        self.thumbnails = {}
+        # JPG 監控機制: 儲存路徑與最後修改時間
+        self.monitored_files = {} # {filename: {'path': jpg_path, 'mtime': timestamp}}
+        self.init_ui()
+        
+        # 啟動定時器，每 2 秒檢查一次已顯示的 JPG 是否有更新
+        self.monitoring_timer = QTimer(self)
+        self.monitoring_timer.timeout.connect(self.check_for_updates)
+        self.monitoring_timer.start(2000)
+    
+    def check_for_updates(self):
+        """檢查監控中的檔案是否有變更"""
+        for filename, info in list(self.monitored_files.items()):
+            jpg_path = info.get('path')
+            last_mtime = info.get('mtime')
+            
+            if jpg_path and os.path.exists(jpg_path):
+                try:
+                    current_mtime = os.path.getmtime(jpg_path)
+                    # 如果檔案修改時間變新了 (且不是 0)
+                    if current_mtime > last_mtime and last_mtime > 0:
+                        # 更新記錄
+                        self.monitored_files[filename]['mtime'] = current_mtime
+                        # 觸發 UI 更新
+                        # 使用 retry_count=0 立即嘗試重新載入
+                        self.update_thumbnail(filename, jpg_path)
+                        # 如果 parent 存在，或許可以發出 log
+                        if self.parent_window and hasattr(self.parent_window, "add_log"):
+                            # 避免 log 刷屏，只在控制台印出或選擇性 log
+                            # self.parent_window.add_log(f"🔄 偵測到外部更新: {filename}")
+                            pass
+                except:
+                    pass
+
+    def init_ui(self):
+        layout = QGridLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(10, 10, 10, 10)
+        # 設定整體對齊方式為靠上，避免單行時被強制垂直拉伸
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        # 強制 4 列等寬
+        for i in range(4):
+            layout.setColumnStretch(i, 1)
+        self.setLayout(layout)
+    
+    def add_placeholder(self, name, index):
+        """添加佔位符（4 列排列）"""
+        # 外層框架
+        frame = QFrame()
+        # 強制每個卡片使用擴展策略 (垂直方向改為 Preferred 以配合 heightForWidth)
+        from PyQt6.QtWidgets import QSizePolicy
+        frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {DarkTheme.BG_TERTIARY};
+                border: 1px solid {DarkTheme.BORDER};
+                border-radius: 5px;
+                padding: 5px;
+                min-width: 110px;
+            }}
+        """)
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setSpacing(3)
+        frame_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # 頂部：文件名和重新處理按鈕
+        top_layout = QHBoxLayout()
+        
+        # 顯示文件名
+        name_label = QLabel(name)
+        # 加大字體並加粗
+        name_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        name_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        name_label.setStyleSheet(f"color: {DarkTheme.TEXT_PRIMARY};")
+        name_label.setWordWrap(True)
+        # 移除高度限制，改用最小高度，讓它能完整顯示多行文字
+        name_label.setMinimumHeight(40)
+        
+        # 重新處理按鈕
+        reprocess_btn = QPushButton("↻")
+        reprocess_btn.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        reprocess_btn.setMaximumWidth(30)
+        reprocess_btn.setMaximumHeight(30)
+        reprocess_btn.setMinimumWidth(30)
+        reprocess_btn.setMinimumHeight(30)
+        reprocess_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {DarkTheme.ACCENT_CYAN};
+                color: {DarkTheme.BG_PRIMARY};
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+                padding: 2px;
+            }}
+            QPushButton:hover {{
+                background-color: {DarkTheme.ACCENT_PURPLE};
+            }}
+            QPushButton:pressed {{
+                background-color: {DarkTheme.ACCENT_PINK};
+            }}
+        """)
+        # 使用 functools.partial 來正確傳遞文件名，不接收信號的布爾參數
+        reprocess_btn.clicked.connect(partial(self.on_reprocess_clicked, name))
+        reprocess_btn.setEnabled(False)  # 初始禁用，直到縮圖生成完成
+        
+        # 將 label 設為 stretch=1，讓它佔據所有剩餘空間，確保寬度最大化
+        top_layout.addWidget(name_label, 1)
+        top_layout.addWidget(reprocess_btn)
+        
+        # 顯示狀態/圖像
+        status_label = AspectRatioLabel("⏳ 等待生成")
+        status_label.setFont(QFont("Arial", 8))
+        status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        status_label.setStyleSheet(f"color: {DarkTheme.TEXT_SECONDARY};")
+        status_label.setMinimumHeight(100)
+        # 設定 expanding 策略，讓圖片可以隨視窗放大
+        from PyQt6.QtWidgets import QSizePolicy
+        status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
+        frame_layout.addLayout(top_layout)
+        frame_layout.addWidget(status_label)
+        
+        # 計算行列位置（4 列）
+        row = index // 4
+        col = index % 4
+        self.layout().addWidget(frame, row, col)
+        # 移除 setRowStretch(row, 1)，因為這會強制拉伸行高
+        
+        self.thumbnails[name] = {
+            "frame": frame, 
+            "status_label": status_label,
+            "reprocess_btn": reprocess_btn,
+            "status": "waiting"
+        }
+    
+    def on_reprocess_clicked(self, filename, checked=False):
+        """重新處理按鈕被點擊"""
+        if self.parent_window:
+            self.parent_window.on_reprocess_requested(filename)
+        else:
+            self.reprocess_requested.emit(filename)
+    
+    def update_thumbnail(self, name, jpg_path, retry_count=0):
+        """更新縮圖顯示 JPG 圖像 (附帶重試機制)"""
+        if name not in self.thumbnails:
+            return
+        
+        # 加入監控列表
+        if os.path.exists(jpg_path):
+            try:
+                mtime = os.path.getmtime(jpg_path)
+                self.monitored_files[name] = {'path': jpg_path, 'mtime': mtime}
+            except:
+                pass
+
+        try:
+            status_label = self.thumbnails[name]["status_label"]
+            reprocess_btn = self.thumbnails[name]["reprocess_btn"]
+            
+            # 強制清除舊圖快取
+            # 我們不能直接 QPixmap(jpg_path) 因為 Qt 可能會快取
+            # 開檔讀取二進制資料再載入通常可以繞過快取
+            image_data = None
+            with open(jpg_path, 'rb') as f:
+                image_data = f.read()
+            
+            pixmap = QPixmap()
+            if image_data:
+                pixmap.loadFromData(image_data)
+            
+            if not pixmap.isNull():
+                # 使用 AspectRatioLabel 自動縮放
+                status_label.setPixmap(pixmap)
+                status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.thumbnails[name]["status"] = "completed"
+                # 啟用重新處理按鈕
+                reprocess_btn.setEnabled(True)
+            else:
+                # 如果載入失敗，且重試次數少於 3 次，則嘗試重試
+                if retry_count < 3:
+                     # 1秒後重試
+                    QTimer.singleShot(1000, lambda: self.update_thumbnail(name, jpg_path, retry_count + 1))
+                    if retry_count == 0:
+                        status_label.setText("⏳ 載入中...")
+                else:
+                    status_label.setText("❌ 圖像載入失敗")
+                    # 即使顯示失敗，也啟用按鈕讓使用者可以重試
+                    reprocess_btn.setEnabled(True)
+                    
+        except Exception as e:
+            status_label.setText(f"❌ 錯誤")
+            reprocess_btn.setEnabled(True)
+    
+    def mark_completed(self, name):
+        """標記為已完成"""
+        if name in self.thumbnails:
+            self.thumbnails[name]["status"] = "completed"
+    
+    def mark_failed(self, name):
+        """標記為失敗"""
+        if name not in self.thumbnails:
+            return
+        
+        try:
+            status_label = self.thumbnails[name]["status_label"]
+            status_label.setText("❌ 生成失敗")
+            status_label.setStyleSheet(f"color: {DarkTheme.ACCENT_RED};")
+            self.thumbnails[name]["status"] = "failed"
+        except Exception as e:
+            pass
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("晚報YT縮圖 - 自動生成系統")
+        self.setGeometry(100, 100, 1400, 900)
+        self.setStyleSheet(STYLESHEET)
+        
+        # 載入設定
+        self.settings_file = Path(os.path.expanduser("~")) / ".ytthumb_settings.json"
+        self.load_settings()
+        
+        # 工作線程
+        self.worker = None
+        
+        self.init_ui()
+    
+    def load_settings(self):
+        """載入保存的設定"""
+        self.settings = {}
+        if self.settings_file.exists():
+            try:
+                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                    self.settings = json.load(f)
+            except:
+                self.settings = {}
+    
+    def save_settings(self):
+        """保存設定"""
+        try:
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
+                json.dump(self.settings, f, ensure_ascii=False, indent=2)
+        except:
+            pass
+    
+    def init_ui(self):
+        """初始化 UI"""
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
+        
+        # ===== 頂部操作區 =====
+        top_frame = QFrame()
+        top_layout = QHBoxLayout(top_frame)
+        
+        # 日期
+        date_label = QLabel("📅 日期:")
+        date_label.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        self.date_input = QLineEdit()
+        self.date_input.setText(datetime.now().strftime("%m%d"))
+        self.date_input.setMaximumWidth(100)
+        
+        # 製作者
+        creator_label = QLabel("👤 製作者:")
+        creator_label.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        self.creator_input = QLineEdit()
+        self.creator_input.setPlaceholderText("輸入製作者名稱...")
+        self.creator_input.setMinimumWidth(200)
+        
+        # 開始按鈕
+        self.start_btn = QPushButton("▶ 開始生成")
+        self.start_btn.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        self.start_btn.setMinimumWidth(120)
+        self.start_btn.clicked.connect(self.on_start_clicked)
+        
+        # 暫停按鈕
+        self.pause_btn = QPushButton("⏸ 暫停")
+        self.pause_btn.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        self.pause_btn.setMinimumWidth(80)
+        self.pause_btn.hide()  # 預設隱藏
+        self.pause_btn.clicked.connect(self.on_pause_clicked)
+        
+        # 進度顯示
+        self.progress_label = QLabel("準備就緒")
+        self.progress_label.setFont(QFont("Arial", 10))
+        self.progress_label.setStyleSheet(f"color: {DarkTheme.TEXT_SECONDARY};")
+        
+        top_layout.addWidget(date_label)
+        top_layout.addWidget(self.date_input)
+        top_layout.addSpacing(20)
+        top_layout.addWidget(creator_label)
+        top_layout.addWidget(self.creator_input)
+        top_layout.addStretch()
+        top_layout.addWidget(self.progress_label)
+        top_layout.addWidget(self.start_btn)
+        top_layout.addWidget(self.pause_btn)
+        
+        main_layout.addWidget(top_frame)
+        
+        # ===== 中間內容區（左右分割） =====
+        content_layout = QHBoxLayout()
+        
+        # ===== 左側：文件列表 =====
+        left_frame = QFrame()
+        left_layout = QVBoxLayout(left_frame)
+        
+        left_title = QLabel("📁 文字檔案")
+        left_title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        left_title.setStyleSheet(f"color: {DarkTheme.ACCENT_CYAN};")
+        
+        browse_btn = QPushButton("🔍 瀏覽文件夾")
+        browse_btn.clicked.connect(self.on_browse_folder)
+        
+        self.file_list = FileListWidget()
+        
+        file_ops_layout = QHBoxLayout()
+        all_btn = QPushButton("全選")
+        all_btn.clicked.connect(self.file_list.toggle_all)
+        
+        # 將「反選」按鈕修改為「重整列表」按鈕
+        refresh_btn = QPushButton("↻ 重整列表")
+        refresh_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {DarkTheme.BG_TERTIARY};
+                color: {DarkTheme.TEXT_SECONDARY};
+                border: 1px solid {DarkTheme.BORDER};
+            }}
+            QPushButton:hover {{
+                color: {DarkTheme.TEXT_PRIMARY};
+                border-color: {DarkTheme.ACCENT_CYAN};
+            }}
+        """)
+        # 連結到瀏覽文件夾函數，這樣會重新讀取當前或預設路徑中的文件
+        refresh_btn.clicked.connect(self.on_refresh_files)
+        
+        file_ops_layout.addWidget(all_btn)
+        file_ops_layout.addWidget(refresh_btn)
+        
+        left_layout.addWidget(left_title)
+        left_layout.addWidget(browse_btn)
+        left_layout.addWidget(self.file_list)
+        left_layout.addLayout(file_ops_layout)
+        
+        # ===== 右側：預覽區 =====
+        right_frame = QFrame()
+        right_layout = QVBoxLayout(right_frame)
+        
+        right_title = QLabel("🖼️  待生成縮圖")
+        right_title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        right_title.setStyleSheet(f"color: {DarkTheme.ACCENT_PINK};")
+        
+        self.stats_label = QLabel("待生成: 0 | 已完成: 0 | 失敗: 0")
+        self.stats_label.setFont(QFont("Arial", 10))
+        self.stats_label.setStyleSheet(f"color: {DarkTheme.TEXT_SECONDARY};")
+        
+        self.scroll = QScrollArea()
+        self.thumbnail_grid = ThumbnailGridWidget(parent_window=self)
+        self.thumbnail_grid.reprocess_requested.connect(self.on_reprocess_requested)
+        self.scroll.setWidget(self.thumbnail_grid)
+        self.scroll.setWidgetResizable(True)
+        
+        right_layout.addWidget(right_title)
+        right_layout.addWidget(self.stats_label)
+        right_layout.addWidget(self.scroll)
+        
+        content_layout.addWidget(left_frame, 1)
+        content_layout.addWidget(right_frame, 3)
+        main_layout.addLayout(content_layout)
+        
+        # ===== 進度條 =====
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        main_layout.addWidget(self.progress_bar)
+        
+        # ===== 底部日誌區 =====
+        log_title = QLabel("📋 工作日誌 (可摺疊)")
+        log_title.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        log_title.setStyleSheet(f"color: {DarkTheme.ACCENT_ORANGE};")
+        
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumHeight(150)
+        
+        log_ops_layout = QHBoxLayout()
+        clear_log_btn = QPushButton("🗑️ 清空日誌")
+        clear_log_btn.clicked.connect(self.on_clear_log)
+        open_folder_btn = QPushButton("📂 打開文件夾")
+        open_folder_btn.clicked.connect(self.on_open_folder)
+        log_ops_layout.addWidget(clear_log_btn)
+        log_ops_layout.addWidget(open_folder_btn)
+        log_ops_layout.addStretch()
+        
+        main_layout.addWidget(log_title)
+        main_layout.addWidget(self.log_text)
+        main_layout.addLayout(log_ops_layout)
+        
+        self.add_log("✓ 系統已啟動")
+        
+        # 自動載入預設路徑中的文件
+        self.auto_load_default_folder()
+    
+    def auto_load_default_folder(self):
+        """自動載入預設網路路徑中的文件"""
+        # 獲取今天的日期（MMDD 格式）
+        today = datetime.now().strftime("%m%d")
+        
+        # 構建預設路徑列表（優先順序）
+        base_path = r"\\10.227.58.117\新聞txt"
+        default_paths = [
+            os.path.join(base_path, today, "1800"),
+            os.path.join(base_path, today, "1819"),
+            os.path.join(base_path, today),
+        ]
+        
+        # 尋找存在的路徑並載入
+        folder_loaded = False
+        for folder_path in default_paths:
+            if os.path.exists(folder_path):
+                self.load_files_from_folder(folder_path)
+                self.settings["last_folder"] = folder_path
+                self.save_settings()
+                self.add_log(f"✓ 已自動載入: {folder_path}")
+                folder_loaded = True
+                break
+        
+        if not folder_loaded:
+            self.add_log(f"⚠️ 預設路徑不存在，請手動選擇文件夾")
+
+    def on_refresh_files(self):
+        """刷新當前文件夾的文件"""
+        current_folder = self.settings.get("last_folder", "")
+        if current_folder and os.path.exists(current_folder):
+            self.load_files_from_folder(current_folder)
+            self.add_log(f"🔄 已重新整理列表: {current_folder}")
+        else:
+            self.on_browse_folder()
+    
+    
+    def add_log(self, message):
+        """添加日誌"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_text.append(f"[{timestamp}] {message}")
+        # 自動滾動到底部
+        self.log_text.verticalScrollBar().setValue(
+            self.log_text.verticalScrollBar().maximum()
+        )
+    
+    def on_browse_folder(self):
+        """瀏覽文件夾"""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "選擇文字檔案夾",
+            os.path.expanduser("~")
+        )
+        if folder:
+            self.load_files_from_folder(folder)
+            # 保存文件夾路徑到設定
+            self.settings["last_folder"] = folder
+            self.save_settings()
+            self.add_log(f"✓ 已載入文件夾: {folder}")
+    
+    def load_files_from_folder(self, folder_path):
+        """從文件夾載入 .txt 檔案 (只顯示檔名含有「晚報YT縮圖」的，按數字排序)"""
+        self.file_list.clear()
+        self.file_list.item_checked = {}
+        
+        # 獲取所有 .txt 檔案
+        all_txt_files = glob.glob(os.path.join(folder_path, "*.txt"))
+        
+        # 過濾：只顯示檔名含有「晚報YT縮圖」的文件
+        filtered_files = [f for f in all_txt_files if "晚報YT縮圖" in os.path.basename(f)]
+        
+        # 按檔名中的數字排序（自訂排序方式）
+        filtered_files = sorted(filtered_files, key=lambda x: extract_numbers_for_sort(os.path.basename(x)))
+        
+        for file_path in filtered_files:
+            filename = os.path.basename(file_path)
+            self.file_list.add_file(filename)
+        
+        # === 新增功能：載入文件時自動預覽已完成的縮圖 ===
+        # 初始化預覽縮圖網格
+        self.thumbnail_grid = ThumbnailGridWidget(parent_window=self)
+        self.thumbnail_grid.reprocess_requested.connect(self.on_reprocess_requested)
+        
+        # 1. 嘗試推斷輸出路徑
+        # 嘗試從路徑中提取 MMDD (4位數字)，例如 .../0130/...
+        date_match = re.search(r'[\\/](\d{4})[\\/]', folder_path)
+        if not date_match:
+             # 嘗試判斷目錄名本身是否就是 MMDD (如 .../0130)
+             date_match = re.search(r'[\\/](\d{4})$', folder_path)
+        
+        mmdd = date_match.group(1) if date_match else datetime.now().strftime("%m%d")
+        
+        # 設定預期的 JPG 輸出目錄 (標準網位路徑)
+        # 結構通常是: \\10.227.58.117\新聞psd\MMDD\縮圖\JPG
+        base_output = r"\\10.227.58.117\新聞psd"
+        jpg_output_dir = os.path.join(base_output, mmdd, "縮圖", "JPG")
+        
+        # 如果標準路徑不存在或無法訪問，才嘗試舊的相對路徑邏輯
+        if not os.path.exists(jpg_output_dir):
+            jpg_output_dir = os.path.join(folder_path, "縮圖")
+            # 如果連相對路徑的縮圖資料夾也沒有，再試試看上一層的縮圖/JPG (針對本地測試結構)
+            if not os.path.exists(jpg_output_dir):
+                jpg_output_dir = os.path.join(folder_path, "縮圖", "JPG")
+
+        self.add_log(f"🔍 預覽掃描目錄: {jpg_output_dir}")
+
+        # 緩存目錄下所有 JPG 檔案，避免重複 IO
+        existing_jpgs = {} # {normalized_name: full_filename}
+        if os.path.exists(jpg_output_dir):
+            try:
+                # 只列出檔案名
+                for f in os.listdir(jpg_output_dir):
+                    if f.lower().endswith('.jpg'):
+                         # 建立標準化映射
+                         norm_name = normalize_string_for_compare(f)
+                         existing_jpgs[norm_name] = f
+            except:
+                pass
+
+        # 僅將已存在縮圖的文件加入網格
+        grid_index = 0
+        for file_path in filtered_files:
+            filename = os.path.basename(file_path)
+            filename_no_ext = os.path.splitext(filename)[0]
+            
+            jpg_path = None
+            
+            target_slugs = [] # 候選的比較字串 (標準化後)
+            
+            # 1. 加入檔名本身 (標準化)
+            target_slugs.append(normalize_string_for_compare(filename_no_ext))
+            
+            # 2. 嘗試讀取 Slag (文字檔第一行)
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    first_line = f.readline().strip()
+                if first_line:
+                    target_slugs.append(normalize_string_for_compare(first_line))
+            except:
+                pass
+            
+            # 3. 嘗試匹配
+            # 預期生成的 JPG 檔名包含: MMDD + Slag/Filename
+            # 所以如果 existing_jpgs 的某些 key 包含 (mmdd + target_slug)，就算匹配
+            
+            mmdd_norm = normalize_string_for_compare(mmdd)
+            
+            for slug in target_slugs:
+                # 組合期望的關鍵特徵: mmdd + slug
+                # 注意: 實際檔名可能是 mmdd_slug_creator.jpg，中間可能有其他字符
+                # 所以我們檢查 key 是否包含 mmdd 和 slug
+                
+                # 簡單模式: 檢查是否有任何 jpg 的標準化名稱等於 mmdd + slug (或其他組合)
+                # 由於這比較嚴格，我們改用包含測試
+                
+                for exist_norm, exist_f in existing_jpgs.items():
+                    # 檢查是否以 mmdd 開頭，並且包含 slug
+                    if exist_norm.startswith(mmdd_norm) and slug in exist_norm:
+                        jpg_path = os.path.join(jpg_output_dir, exist_f)
+                        break
+                if jpg_path: break
+            
+            # 如果還沒找到，嘗試放寬條件: 只要包含 slug 且在目標資料夾內 (假設資料夾本身已經分日期了)
+            if not jpg_path:
+                 for slug in target_slugs:
+                    for exist_norm, exist_f in existing_jpgs.items():
+                        if slug in exist_norm:
+                            jpg_path = os.path.join(jpg_output_dir, exist_f)
+                            break
+                    if jpg_path: break
+
+            if jpg_path and os.path.exists(jpg_path):
+                # 只有當縮圖存在時才添加到網格
+                self.thumbnail_grid.add_placeholder(filename, grid_index)
+                self.thumbnail_grid.update_thumbnail(filename, jpg_path)
+                grid_index += 1
+        
+        # 設置為 ScrollArea 的內容
+        self.scroll.setWidget(self.thumbnail_grid)
+        # ============================================
+
+        total_found = len(all_txt_files)
+        filtered_count = len(filtered_files)
+        self.add_log(f"✓ 找到 {filtered_count} 個晚報YT縮圖檔案 (總共 {total_found} 個 .txt 文件)")
+    
+    def on_start_clicked(self):
+        """開始生成"""
+        try:
+            creator = self.creator_input.text().strip()
+            if not creator:
+                QMessageBox.warning(self, "警告", "請輸入製作者名稱")
+                return
+            
+            checked_files = self.file_list.get_checked_files()
+            if not checked_files:
+                QMessageBox.warning(self, "警告", "請選擇至少一個文件")
+                return
+            
+            # 保存設定
+            self.settings["creator"] = creator
+            self.save_settings()
+            
+            # 更新 UI 狀態
+            self.start_btn.setEnabled(False)
+            self.start_btn.setText("⏳ 處理中...")
+            self.pause_btn.show()
+            self.pause_btn.setEnabled(True)
+            self.pause_btn.setText("⏸ 暫停")
+            self.progress_label.setText(f"處理中... (0/{len(checked_files)})")
+            
+            self.add_log(f"▶ 開始生成 {len(checked_files)} 個縮圖")
+            self.add_log(f"  製作者: {creator}")
+            
+            # 準備預覽縮圖網格 (如果不存在則建立，存在則重置選中項狀態)
+            if not hasattr(self, 'thumbnail_grid') or self.thumbnail_grid is None:
+                self.thumbnail_grid = ThumbnailGridWidget(parent_window=self)
+                self.thumbnail_grid.reprocess_requested.connect(self.on_reprocess_requested)
+                self.scroll.setWidget(self.thumbnail_grid)
+
+            # 重置選中檔案的狀態
+            for filename in checked_files:
+                # 確保項目存在於網格中
+                if filename not in self.thumbnail_grid.thumbnails:
+                    current_count = len(self.thumbnail_grid.thumbnails)
+                    self.thumbnail_grid.add_placeholder(filename, current_count)
+                
+                # 重置顯示狀態為等待中
+                self.thumbnail_grid.thumbnails[filename]["status_label"].setText("⏳ 等待生成")
+                self.thumbnail_grid.thumbnails[filename]["status_label"].setPixmap(QPixmap()) # 清空圖片
+                self.thumbnail_grid.thumbnails[filename]["status"] = "waiting"
+                self.thumbnail_grid.thumbnails[filename]["reprocess_btn"].setEnabled(False)
+            
+            # 更新統計
+            self.stats_label.setText(f"待生成: {len(checked_files)} | 已完成: 0 | 失敗: 0")
+            self.progress_bar.setValue(0)
+            
+            # 創建並啟動工作線程
+            date = self.date_input.text().strip()
+            last_folder = self.settings.get("last_folder", os.getcwd())
+            
+            self.worker = GenerationWorker(checked_files, date, creator, last_folder)
+            self.worker.progress.connect(self.on_progress_update)
+            self.worker.log.connect(self.on_worker_log)
+            self.worker.completed.connect(self.on_generation_complete)
+            self.worker.error.connect(self.on_worker_error)
+            self.worker.file_completed.connect(self.on_file_completed)
+            self.worker.file_failed.connect(self.on_file_failed)
+            self.worker.start()
+            
+        except Exception as e:
+            self.add_log(f"❌ 錯誤: {str(e)}")
+            self.start_btn.setEnabled(True)
+            self.start_btn.setText("▶ 開始生成")
+            self.pause_btn.hide()
+            import traceback
+            print(traceback.format_exc())
+
+    def on_pause_clicked(self):
+        """暫停/繼續"""
+        if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
+            if self.worker.is_paused:
+                self.worker.resume()
+                self.pause_btn.setText("⏸ 暫停")
+                self.start_btn.setText("⏳ 處理中...")
+                self.add_log("▶ 繼續執行")
+            else:
+                self.worker.pause()
+                self.pause_btn.setText("▶ 繼續")
+                self.start_btn.setText("⏸ 已暫停")
+                self.add_log("⏸ 已暫停 (將在當前任務完成後暫停)")
+    
+    def on_progress_update(self, index, total, filename):
+        """更新進度條"""
+        if total > 0:
+            percent = int((index / total) * 100)
+            self.progress_bar.setValue(percent)
+            self.progress_label.setText(f"處理中... ({index}/{total})")
+    
+    def on_worker_log(self, message):
+        """工作線程日誌"""
+        self.add_log(message)
+    
+    def on_worker_error(self, error_msg):
+        """工作線程錯誤"""
+        self.add_log(f"❌ {error_msg}")
+        self.start_btn.setEnabled(True)
+        self.start_btn.setText("▶ 開始生成")
+        self.pause_btn.hide()
+
+    
+    def on_generation_complete(self, success_count, failed_count, total_count):
+        """生成完成"""
+        self.start_btn.setEnabled(True)
+        self.start_btn.setText("▶ 開始生成")
+        self.pause_btn.hide()
+        self.pause_btn.setText("⏸ 暫停")
+        self.progress_bar.setValue(100)
+        self.progress_label.setText("已完成")
+        
+        # 更新統計
+        self.stats_label.setText(f"待生成: 0 | 已完成: {success_count} | 失敗: {failed_count}")
+        
+        # 顯示結果於日誌 (取代彈出視窗)
+        if failed_count == 0:
+            msg = f"✓ 所有 {success_count} 個縮圖已成功生成！"
+            color = DarkTheme.ACCENT_GREEN
+        else:
+            msg = f"⚠️ 部分完成 - 成功: {success_count} | 失敗: {failed_count} | 總計: {total_count}"
+            color = DarkTheme.ACCENT_ORANGE
+            
+        # 使用 HTML 格式添加強調日誌
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        # 多加兩行空行讓它更明顯
+        self.log_text.append("")
+        html_msg = f'<span style="color: {color}; font-weight: bold; font-size: 12pt;">[{timestamp}] {msg}</span>'
+        self.log_text.append(html_msg)
+        self.log_text.append("")
+        
+        # 自動滾動到底部
+        self.log_text.verticalScrollBar().setValue(
+            self.log_text.verticalScrollBar().maximum()
+        )
+    
+    def on_file_completed(self, filename, jpg_path):
+        """檔案生成完成，更新縮圖"""
+        self.thumbnail_grid.update_thumbnail(filename, jpg_path)
+    
+    def on_file_failed(self, filename):
+        """檔案生成失敗，標記為失敗狀態"""
+        self.thumbnail_grid.mark_failed(filename)
+    
+    def on_reprocess_complete(self, success_count, failed_count, total_count):
+        """重新處理完成"""
+        # 顯示結果於日誌
+        if failed_count == 0:
+            msg = f"✓ 縮圖重新生成成功！"
+            color = DarkTheme.ACCENT_GREEN
+        else:
+            msg = f"⚠️ 重新生成失敗"
+            color = DarkTheme.ACCENT_RED
+            
+        # 使用 HTML 格式添加強調日誌
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_text.append("")
+        html_msg = f'<span style="color: {color}; font-weight: bold; font-size: 12pt;">[{timestamp}] {msg}</span>'
+        self.log_text.append(html_msg)
+        self.log_text.append("")
+        
+        # 自動滾動到底部
+        self.log_text.verticalScrollBar().setValue(
+            self.log_text.verticalScrollBar().maximum()
+        )
+
+    def on_reprocess_requested(self, filename):
+        """重新處理單個檔案的請求"""
+        try:
+            self.add_log(f"🔔 接收重新處理信號: {filename}")
+            # 取得檔案的完整路徑
+            last_folder = self.settings.get("last_folder", os.getcwd())
+            file_path = os.path.join(last_folder, filename)
+            
+            # 如果找不到檔案，嘗試加上 .txt 副檔名（防呆機制）
+            if not os.path.exists(file_path):
+                if not filename.lower().endswith('.txt'):
+                    test_path = os.path.join(last_folder, filename + ".txt")
+                    if os.path.exists(test_path):
+                        self.add_log(f"ℹ️ 自動修正檔名: {filename} -> {filename}.txt")
+                        filename = filename + ".txt"
+                        file_path = test_path
+            
+            if not os.path.exists(file_path):
+                self.add_log(f"❌ 檔案不存在: {file_path}")
+                return
+            
+            # 檢查縮圖是否存在
+            # 注意: 如果我們修正了 filename (加上 .txt)，這裡的檢查也要對應調整
+            # 但 grid 中的 key 通常是原始傳入的 filename
+            # 如果 key 不匹配，我們可能無法更新 UI 狀態，但仍可執行生成
+            target_key = filename
+            if filename not in self.thumbnail_grid.thumbnails:
+                # 嘗試找原始 key (去掉 .txt 的版本，或是加上 .txt 的版本)
+                if filename.endswith(".txt") and filename[:-4] in self.thumbnail_grid.thumbnails:
+                    target_key = filename[:-4]
+                elif filename + ".txt" in self.thumbnail_grid.thumbnails:
+                    target_key = filename + ".txt"
+                else:
+                    self.add_log(f"⚠️ 找不到對應的縮圖元件 (key: {filename})，將繼續執行但無法更新狀態")
+                    target_key = None
+            
+            # 重置該檔案的縮圖狀態
+            if target_key:
+                self.thumbnail_grid.thumbnails[target_key]["status_label"].setText("⏳ 重新生成中...")
+                self.thumbnail_grid.thumbnails[target_key]["status"] = "processing"
+                self.thumbnail_grid.thumbnails[target_key]["reprocess_btn"].setEnabled(False)
+            
+            self.add_log(f"↻ 重新生成: {filename}")
+            
+            # 建立只包含這個檔案的 worker
+            date = self.date_input.text().strip()
+            creator = self.creator_input.text().strip()
+            
+            self.reprocess_worker = GenerationWorker([filename], date, creator, last_folder)
+            self.reprocess_worker.progress.connect(self.on_progress_update)
+            self.reprocess_worker.log.connect(self.on_worker_log)
+            self.reprocess_worker.file_completed.connect(self.on_file_completed)
+            self.reprocess_worker.file_failed.connect(self.on_file_failed)
+            self.reprocess_worker.error.connect(self.on_worker_error)
+            # 連接完成信號
+            self.reprocess_worker.completed.connect(self.on_reprocess_complete)
+            self.reprocess_worker.start()
+            
+            self.add_log(f"✓ 重新處理 worker 已啟動")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.add_log(f"❌ 重新處理出錯: {str(e)}")
+
+    
+    def on_clear_log(self):
+        """清空日誌"""
+        self.log_text.clear()
+    
+    def on_open_folder(self):
+        """打開輸出文件夾"""
+        output_folder = r"\\10.227.58.117\新聞psd"
+        try:
+            os.startfile(output_folder)
+        except:
+            QMessageBox.warning(self, "錯誤", f"無法打開文件夾: {output_folder}")
+
+
+def main():
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

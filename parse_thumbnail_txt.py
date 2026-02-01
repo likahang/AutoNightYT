@@ -67,13 +67,32 @@ def parse_file(file_path):
         "effect_words": []
     }
     
+    lines = []
+    # 嘗試多種編碼讀取
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             lines = [line.rstrip('\n\r') for line in f.readlines()]
-        
-        # 1. 第一行定義為Slag
-        if lines:
+    except UnicodeDecodeError:
+        try:
+            print(f"UTF-8 解碼失敗，嘗試 CP950: {os.path.basename(file_path)}")
+            with open(file_path, 'r', encoding='cp950') as f:
+                lines = [line.rstrip('\n\r') for line in f.readlines()]
+        except Exception as e:
+            print(f"CP950 解碼也失敗: {e}")
+            lines = []
+    except Exception as e:
+        print(f"讀取檔案錯誤: {e}")
+        return None
+
+    try:
+        # 1. 第一行定義為Slag，如果第一行為空則使用檔名
+        if lines and lines[0].strip():
             result["slag"] = lines[0].strip()
+        else:
+            # 使用檔名作為備援（移除副檔名）
+            filename = os.path.basename(file_path)
+            # 如果檔名包含空格，通常 Slag 也是用空格分隔，我們直接使用檔名即可
+            result["slag"] = os.path.splitext(filename)[0]
         
         # 2. 找出主播名字
         for line in lines:
@@ -84,18 +103,16 @@ def parse_file(file_path):
             if result["anchor"]:
                 break
         
-        # 3. 找出最後二行大標文字（跳過空行），並移除效果字（括號及其內容）
-        # 獲取所有非空的、有效的內容行
+        # 3. 找出最後二行大標文字
         non_empty_lines = []
         for i, line in enumerate(lines):
             stripped = line.strip()
             # 跳過前面的元数据行和空行
             if stripped and not any(anchor in line for anchor in ANCHOR_NAMES) and i > 0:
-                # 檢查是否是大標行（不包含括號的純文本或有引號的文本）
+                # 檢查是否是大標行
                 if re.search(r'[a-zA-Z0-9\u4e00-\u9fff""]', stripped):
                     non_empty_lines.append(stripped)
         
-        # 提取最後的兩行（或一行，如果只有一行可用的大標）
         if len(non_empty_lines) >= 2:
             title1 = non_empty_lines[-2]
             title2 = non_empty_lines[-1]
@@ -106,22 +123,20 @@ def parse_file(file_path):
             title1 = ""
             title2 = ""
         
-        # 移除括號及其內容（效果字）
         result["title_line1"] = re.sub(r'\([^)]*\)', '', title1).strip()
         result["title_line2"] = re.sub(r'\([^)]*\)', '', title2).strip()
         
-        # 4. 找出變色字（""內的文字）
+        # 4. 找出變色字
         full_text = '\n'.join(lines)
         color_word_pattern = r'"([^"]+)"'
         color_matches = re.findall(color_word_pattern, full_text)
-        result["color_words"] = list(set(color_matches))  # 去重複
+        result["color_words"] = list(set(color_matches)) 
         
-        # 5. 找出效果字（()內的字，排除特定關鍵字）
+        # 5. 找出效果字
         effect_pattern = r'\(([^)]+)\)'
         effect_matches = re.findall(effect_pattern, full_text)
         
         for effect in effect_matches:
-            # 排除含有特定關鍵字的效果字
             should_exclude = False
             for keyword in EXCLUDED_EFFECT_KEYWORDS:
                 if keyword in effect:
@@ -131,13 +146,12 @@ def parse_file(file_path):
             if not should_exclude:
                 result["effect_words"].append(effect.strip())
         
-        # 效果字去重複
         result["effect_words"] = list(set(result["effect_words"]))
         
         return result
     
     except Exception as e:
-        print(f"解析檔案時發生錯誤: {e}")
+        print(f"解析內容時發生錯誤: {e}")
         return None
 
 
