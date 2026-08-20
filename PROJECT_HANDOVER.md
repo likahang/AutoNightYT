@@ -29,7 +29,7 @@
 
 - 尚未確認 NAS `10.227.63.105` 的圖片共享權限；目前從此環境測試兩條 0815 路徑都得到 Access denied。
 - 尚未在實際 Photoshop 環境完整跑完 0815 全批次；本地 JSX/解析測試不等於 Photoshop 實機驗證。
-- 已建立 WIP checkpoint commit `cff2718`（`chore: add handover checkpoint`）；尚未 push 到遠端。
+- 已建立 WIP checkpoint commit `1ca853b`（`chore: add handover checkpoint`）；尚未 push 到遠端。
 - 雙圖漸層與數字定位仍需以使用者提供的實際 PSD/圖片做視覺驗證。
 
 ## 5. 最近修改過哪些檔案及原因
@@ -73,7 +73,7 @@ Ran 14 tests ... OK
 
 目前 `git status` 顯示：
 
-- 已提交：核心程式、`AGENTS.md`、本文件及 `test_layout_variants.py` 均已納入 `cff2718`。
+- 已提交：核心程式、`AGENTS.md`、本文件及 `test_layout_variants.py` 均已納入 `1ca853b`。
 - 仍未追蹤：一個測試用文字檔、`chat.json`、`copilot-context.md`、`local_test_startup.log`、測試用 CSV、測試資料夾與本地測試 BAT；這些是本機素材／紀錄，不應加入 Git。
 - 工作樹沒有已追蹤檔案的修改；`git diff` 與 `git diff --check` 均無差異（Git 全域 ignore 權限警告可忽略）。
 
