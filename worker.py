@@ -14,6 +14,7 @@ from pathlib import Path
 from datetime import datetime
 from PyQt6.QtCore import QThread, pyqtSignal
 from generate_photoshop_script import run_generation_logic
+from parse_thumbnail_txt import prepare_file_data
 
 
 class GenerationWorker(QThread):
@@ -24,6 +25,7 @@ class GenerationWorker(QThread):
     log = pyqtSignal(str)  # (日誌信息)
     completed = pyqtSignal(int, int, int)  # (成功數, 失敗數, 總數)
     error = pyqtSignal(str)  # (錯誤信息)
+    warning = pyqtSignal(str)  # 可略過的單檔警告
     file_completed = pyqtSignal(str, str)  # (filename, jpg_path) - 檔案完成並生成 JPG
     file_failed = pyqtSignal(str)  # (filename) - 檔案生成失敗
     
@@ -94,6 +96,26 @@ class GenerationWorker(QThread):
                         self.log.emit(f"❌ [{index+1}/{total_count}] 文件不存在: {filename}")
                         failed_count += 1
                         continue
+
+                    # 先判定版型並驗證標圖版的圖片指示／圖片路徑。
+                    parsed = prepare_file_data(file_path, self.date)
+                    if not parsed:
+                        warning_message = f"{filename}\n解析失敗，已略過該檔。"
+                        self.log.emit(f"⚠️ {warning_message.replace(chr(10), ' ')}")
+                        self.warning.emit(warning_message)
+                        failed_count += 1
+                        self.file_failed.emit(filename)
+                        continue
+                    if parsed.get("validation_errors"):
+                        details = "\n".join(f"• {item}" for item in parsed["validation_errors"])
+                        warning_message = f"{filename}\n{details}\n\n已略過該檔。"
+                        self.log.emit(f"⚠️ {filename}：{'；'.join(parsed['validation_errors'])}（已略過）")
+                        self.warning.emit(warning_message)
+                        failed_count += 1
+                        self.file_failed.emit(filename)
+                        continue
+
+                    self.log.emit(f"  版型判定: {parsed['layout_type']}")
                     
                     # 第一階段不更新進度條，僅記錄日誌
                     # self.progress.emit(index + 1, filename)
@@ -228,6 +250,7 @@ class GenerationWorker(QThread):
 
             csv_file = base_path / "晚報變色.csv"
             psd_file = base_path / "晚報YT縮圖.psd"
+            labeled_psd_file = base_path / "晚報YT縮圖(標圖版).psd"
             
             self.log.emit(f"⚙️ 執行生成邏輯: {os.path.basename(file_path)}")
             
@@ -239,7 +262,9 @@ class GenerationWorker(QThread):
                 str(csv_file),
                 str(jsx_output_dir),
                 psd_output_dir,
-                self.creator
+                self.creator,
+                self.date,
+                str(labeled_psd_file),
             )
             
             if result_code != 0:

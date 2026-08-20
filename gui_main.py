@@ -25,6 +25,7 @@ from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QCursor, QPainter
 from PyQt6.QtCore import QSize
 import subprocess
 import glob
+from parse_thumbnail_txt import infer_mmdd_from_path, is_valid_mmdd
 
 # ===== 配色方案 =====
 class DarkTheme:
@@ -281,6 +282,8 @@ class FileListWidget(QListWidget):
 
 class AspectRatioLabel(QLabel):
     """保持寬高比的標籤"""
+    double_clicked = pyqtSignal()
+
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
         self.setMinimumSize(1, 1)
@@ -328,6 +331,13 @@ class AspectRatioLabel(QLabel):
             painter.drawPixmap(x, y, scaled)
         else:
             super().paintEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 class ThumbnailGridWidget(QWidget):
@@ -454,6 +464,9 @@ class ThumbnailGridWidget(QWidget):
         status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         status_label.setStyleSheet(f"color: {DarkTheme.TEXT_SECONDARY};")
         status_label.setMinimumHeight(100)
+        status_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        status_label.setToolTip("雙擊開啟對應 PSD")
+        status_label.double_clicked.connect(partial(self.open_psd_for_thumbnail, name))
         # 設定 expanding 策略，讓圖片可以隨視窗放大
         from PyQt6.QtWidgets import QSizePolicy
         status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -471,7 +484,9 @@ class ThumbnailGridWidget(QWidget):
             "frame": frame, 
             "status_label": status_label,
             "reprocess_btn": reprocess_btn,
-            "status": "waiting"
+            "status": "waiting",
+            "jpg_path": None,
+            "psd_path": None
         }
     
     def on_reprocess_clicked(self, filename, checked=False):
@@ -480,6 +495,73 @@ class ThumbnailGridWidget(QWidget):
             self.parent_window.on_reprocess_requested(filename)
         else:
             self.reprocess_requested.emit(filename)
+
+    def find_psd_for_jpg(self, jpg_path):
+        """從縮圖 JPG 路徑推回對應的 PSD 路徑"""
+        if not jpg_path:
+            return None
+
+        jpg = Path(jpg_path)
+        output_dir = jpg.parent.parent if jpg.parent.name.lower() == "jpg" else jpg.parent
+        stem = jpg.stem
+
+        candidates = [
+            output_dir / f"{stem}.psd",
+        ]
+
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+
+        try:
+            all_psds = list(output_dir.glob("*.psd"))
+        except Exception:
+            return None
+
+        # 有製作者時，JPG 會移除最後的 _製作者，但 PSD 仍保留該後綴。
+        suffix_matches = [psd for psd in all_psds if psd.stem.startswith(f"{stem}_")]
+        if suffix_matches:
+            newest = max(suffix_matches, key=lambda p: p.stat().st_mtime)
+            return str(newest)
+
+        # 最後用寬鬆比對，支援檔名中有空白、底線或橫線差異。
+        target_norm = normalize_string_for_compare(stem)
+        loose_matches = []
+        for psd in all_psds:
+            psd_norm = normalize_string_for_compare(psd.stem)
+            if target_norm and target_norm in psd_norm:
+                loose_matches.append(psd)
+
+        if loose_matches:
+            newest = max(loose_matches, key=lambda p: p.stat().st_mtime)
+            return str(newest)
+
+        return None
+
+    def open_psd_for_thumbnail(self, name):
+        """雙擊縮圖時開啟對應 PSD"""
+        info = self.thumbnails.get(name)
+        if not info:
+            return
+
+        jpg_path = info.get("jpg_path")
+        psd_path = info.get("psd_path")
+
+        if not psd_path or not os.path.exists(psd_path):
+            psd_path = self.find_psd_for_jpg(jpg_path)
+            info["psd_path"] = psd_path
+
+        if psd_path and os.path.exists(psd_path):
+            try:
+                os.startfile(psd_path)
+                if self.parent_window and hasattr(self.parent_window, "add_log"):
+                    self.parent_window.add_log(f"🖼️ 已開啟 PSD: {os.path.basename(psd_path)}")
+            except Exception as e:
+                QMessageBox.warning(self, "錯誤", f"無法開啟 PSD:\n{psd_path}\n\n{e}")
+        else:
+            if self.parent_window and hasattr(self.parent_window, "add_log"):
+                self.parent_window.add_log(f"⚠️ 找不到對應 PSD: {name}")
+            QMessageBox.warning(self, "找不到 PSD", "找不到這張縮圖對應的 PSD 檔。")
     
     def update_thumbnail(self, name, jpg_path, retry_count=0):
         """更新縮圖顯示 JPG 圖像 (附帶重試機制)"""
@@ -514,6 +596,8 @@ class ThumbnailGridWidget(QWidget):
                 status_label.setPixmap(pixmap)
                 status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.thumbnails[name]["status"] = "completed"
+                self.thumbnails[name]["jpg_path"] = jpg_path
+                self.thumbnails[name]["psd_path"] = self.find_psd_for_jpg(jpg_path)
                 # 啟用重新處理按鈕
                 reprocess_btn.setEnabled(True)
             else:
@@ -827,13 +911,12 @@ class MainWindow(QMainWindow):
         self.thumbnail_grid.reprocess_requested.connect(self.on_reprocess_requested)
         
         # 1. 嘗試推斷輸出路徑
-        # 嘗試從路徑中提取 MMDD (4位數字)，例如 .../0130/...
-        date_match = re.search(r'[\\/](\d{4})[\\/]', folder_path)
-        if not date_match:
-             # 嘗試判斷目錄名本身是否就是 MMDD (如 .../0130)
-             date_match = re.search(r'[\\/](\d{4})$', folder_path)
-        
-        mmdd = date_match.group(1) if date_match else datetime.now().strftime("%m%d")
+        # 嘗試從路徑中提取 MMDD，例如 .../0813/1800 或 .../08月/0813/1800。
+        previous_date = self.date_input.text().strip()
+        mmdd = infer_mmdd_from_path(folder_path)
+        if previous_date != mmdd:
+            self.date_input.setText(mmdd)
+            self.add_log(f"📅 日期已切換為: {mmdd}")
         
         # 設定預期的 JPG 輸出目錄 (標準網位路徑)
         # 結構通常是: \\10.227.58.117\新聞psd\MMDD\縮圖\JPG
@@ -973,6 +1056,8 @@ class MainWindow(QMainWindow):
                 self.thumbnail_grid.thumbnails[filename]["status_label"].setText("⏳ 等待生成")
                 self.thumbnail_grid.thumbnails[filename]["status_label"].setPixmap(QPixmap()) # 清空圖片
                 self.thumbnail_grid.thumbnails[filename]["status"] = "waiting"
+                self.thumbnail_grid.thumbnails[filename]["jpg_path"] = None
+                self.thumbnail_grid.thumbnails[filename]["psd_path"] = None
                 self.thumbnail_grid.thumbnails[filename]["reprocess_btn"].setEnabled(False)
             
             # 更新統計
@@ -981,6 +1066,12 @@ class MainWindow(QMainWindow):
             
             # 創建並啟動工作線程
             date = self.date_input.text().strip()
+            if not is_valid_mmdd(date):
+                QMessageBox.warning(self, "警告", "日期格式錯誤，請輸入 MMDD，例如 0813")
+                self.start_btn.setEnabled(True)
+                self.start_btn.setText("▶ 開始生成")
+                self.pause_btn.hide()
+                return
             last_folder = self.settings.get("last_folder", os.getcwd())
             
             self.worker = GenerationWorker(checked_files, date, creator, last_folder)
@@ -988,6 +1079,7 @@ class MainWindow(QMainWindow):
             self.worker.log.connect(self.on_worker_log)
             self.worker.completed.connect(self.on_generation_complete)
             self.worker.error.connect(self.on_worker_error)
+            self.worker.warning.connect(self.on_worker_warning)
             self.worker.file_completed.connect(self.on_file_completed)
             self.worker.file_failed.connect(self.on_file_failed)
             self.worker.start()
@@ -1031,6 +1123,10 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(True)
         self.start_btn.setText("▶ 開始生成")
         self.pause_btn.hide()
+
+    def on_worker_warning(self, warning_msg):
+        """顯示可略過的單檔警告，批次工作繼續執行。"""
+        QMessageBox.warning(self, "檔案已略過", warning_msg)
 
     
     def on_generation_complete(self, success_count, failed_count, total_count):
@@ -1136,12 +1232,17 @@ class MainWindow(QMainWindow):
             if target_key:
                 self.thumbnail_grid.thumbnails[target_key]["status_label"].setText("⏳ 重新生成中...")
                 self.thumbnail_grid.thumbnails[target_key]["status"] = "processing"
+                self.thumbnail_grid.thumbnails[target_key]["jpg_path"] = None
+                self.thumbnail_grid.thumbnails[target_key]["psd_path"] = None
                 self.thumbnail_grid.thumbnails[target_key]["reprocess_btn"].setEnabled(False)
             
             self.add_log(f"↻ 重新生成: {filename}")
             
             # 建立只包含這個檔案的 worker
             date = self.date_input.text().strip()
+            if not is_valid_mmdd(date):
+                QMessageBox.warning(self, "警告", "日期格式錯誤，請輸入 MMDD，例如 0813")
+                return
             creator = self.creator_input.text().strip()
             
             self.reprocess_worker = GenerationWorker([filename], date, creator, last_folder)
@@ -1150,6 +1251,7 @@ class MainWindow(QMainWindow):
             self.reprocess_worker.file_completed.connect(self.on_file_completed)
             self.reprocess_worker.file_failed.connect(self.on_file_failed)
             self.reprocess_worker.error.connect(self.on_worker_error)
+            self.reprocess_worker.warning.connect(self.on_worker_warning)
             # 連接完成信號
             self.reprocess_worker.completed.connect(self.on_reprocess_complete)
             self.reprocess_worker.start()
@@ -1167,7 +1269,11 @@ class MainWindow(QMainWindow):
     
     def on_open_folder(self):
         """打開輸出文件夾"""
-        output_folder = r"\\10.227.58.117\新聞psd"
+        date = self.date_input.text().strip()
+        if is_valid_mmdd(date):
+            output_folder = os.path.join(r"\\10.227.58.117\新聞psd", date, "縮圖")
+        else:
+            output_folder = r"\\10.227.58.117\新聞psd"
         try:
             os.startfile(output_folder)
         except:

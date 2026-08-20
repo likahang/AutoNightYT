@@ -11,7 +11,9 @@ pyinstaller ^
  --add-data "晚報YT縮圖.psd;." ^
  --add-data "晚報變色.csv;." ^
  --add-data "右上變色.csv;." ^
+ --add-data "效果字處理.csv;." ^
  --add-data "參考.jsx;." ^
+ --noupx ^
  --hidden-import "pandas" ^
  --hidden-import "psd_tools" ^
  gui_main.py

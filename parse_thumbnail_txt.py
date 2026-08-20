@@ -8,6 +8,7 @@
 import os
 import sys
 import re
+from difflib import SequenceMatcher
 from datetime import datetime
 from pathlib import Path
 
@@ -30,11 +31,280 @@ ANCHOR_NAMES = ["林嘉源", "鄭亦真", "張雅婷", "洪淑芬", "麥玉潔",
 # 需要排除的效果字關鍵字
 EXCLUDED_EFFECT_KEYWORDS = ["大底黑色", "何橞瑢", "漫畫驚訝調暗暗"]
 
+LAYOUT_BIG_TITLE = "大標版"
+LAYOUT_IMAGE_TITLE = "標圖版"
+DEFAULT_IMAGE_ROOT = r"\\10.227.63.105\public\__CG-IN"
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+LEFT_MARKER_PATTERN = r"左邊(?:直)?字"
+
+
+def _is_parenthesized_line(value):
+    """整行必須只包含一組半形括號，才視為圖片指示。"""
+    return bool(re.fullmatch(r"\([^()]+\)", value.strip()))
+
+
+def _parse_left_marker(line):
+    """解析左邊字標記，支援文字在標記外或括號內兩種格式。"""
+    stripped = line.strip()
+
+    embedded_match = re.fullmatch(
+        rf"\(\s*({LEFT_MARKER_PATTERN})\s*[:：]\s*(.*?)\s*\)",
+        stripped,
+    )
+    if embedded_match:
+        return {
+            "label": embedded_match.group(1),
+            "left_text": embedded_match.group(2).strip(),
+            "embedded": True,
+        }
+
+    marker_match = re.search(rf"\(\s*({LEFT_MARKER_PATTERN})\s*\)", line)
+    if marker_match:
+        left_text = re.sub(rf"\(\s*{LEFT_MARKER_PATTERN}\s*\)", "", line).strip()
+        return {
+            "label": marker_match.group(1),
+            "left_text": left_text,
+            "embedded": False,
+        }
+
+    return None
+
+
+def _is_left_marker_effect(value):
+    """避免左邊字標記被誤加入效果字。"""
+    return bool(re.fullmatch(rf"\s*{LEFT_MARKER_PATTERN}(?:\s*[:：].*)?\s*", value.strip()))
+
+
+def _find_nearby_image_instruction(lines, marker_index, prefer_after=False):
+    """找左邊字附近的圖片指示；舊格式在上一行，新括號格式常在下一行。"""
+    directions = (1, -1) if prefer_after else (-1, 1)
+
+    for direction in directions:
+        index = marker_index + direction
+        while 0 <= index < len(lines):
+            candidate = lines[index].strip()
+            if not candidate:
+                index += direction
+                continue
+
+            if _is_parenthesized_line(candidate) and not _parse_left_marker(candidate):
+                return candidate[1:-1].strip()
+            break
+
+    return ""
+
+
+def _normalize_image_text(value):
+    """建立圖片指示與檔名配對用的寬鬆文字鍵。"""
+    value = str(value)
+    suffix = Path(value).suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        value = str(Path(value).with_suffix(""))
+    value = re.sub(r"^\s*\d+\s*[.．、_\-]*\s*", "", value)
+    value = value.lower()
+    value = value.replace("縮圖", "").replace("圖片", "").replace("照片", "").replace("圖", "")
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)
+
+
+def get_image_directory_candidates(mmdd, image_root=DEFAULT_IMAGE_ROOT):
+    """回傳當日／月份歸檔目錄，兼容圖片資料夾大小寫寫法。"""
+    mmdd = str(mmdd or "").strip()
+    if not re.fullmatch(r"\d{4}", mmdd):
+        return []
+
+    month_folder = f"{mmdd[:2]}月"
+    candidates = []
+    # 不同日期／NAS 可能使用不同的圖片資料夾名稱。
+    for archive_parts in ((mmdd,), (month_folder, mmdd)):
+        for folder_name in ("晚報yt縮圖", "YT縮圖"):
+            candidates.append(os.path.join(image_root, *archive_parts, "1800", folder_name))
+    return candidates
+
+
+def _image_instruction_parts(instruction):
+    """圖片指示可用 + / ＋ 拆成多張圖，順序即左右順序。"""
+    parts = [part.strip() for part in re.split(r"\s*[+＋]\s*", instruction or "") if part.strip()]
+    return parts or [str(instruction or "").strip()]
+
+
+def _collect_image_candidates(result, mmdd, image_root=DEFAULT_IMAGE_ROOT):
+    directories = get_image_directory_candidates(mmdd, image_root)
+    if not directories:
+        return [], [], f"日期格式錯誤：{mmdd!r}（應為 MMDD）"
+
+    issue_match = re.search(r"晚報YT縮圖\s*(\d+)", result.get("slag", ""))
+    issue_number = int(issue_match.group(1)) if issue_match else None
+    candidates = []
+    existing_directories = []
+
+    for directory_index, directory in enumerate(directories):
+        if not os.path.isdir(directory):
+            continue
+        existing_directories.append(directory)
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+
+        for entry in entries:
+            if not entry.is_file() or Path(entry.name).suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+
+            stem = Path(entry.name).stem
+            prefix_match = re.match(r"^\s*(\d+)(?=\D|$)", stem)
+            prefix_number = int(prefix_match.group(1)) if prefix_match else None
+            number_match = issue_number is not None and prefix_number == issue_number
+            candidate_key = _normalize_image_text(stem)
+            # 同分時優先當日根目錄，再依檔名排序，確保結果固定。
+            candidates.append({
+                "number_match": number_match,
+                "directory_rank": -directory_index,
+                "name": entry.name.lower(),
+                "path": entry.path,
+                "key": candidate_key,
+            })
+
+    return candidates, directories, None
+
+
+def _score_image_candidate(candidate, instruction):
+    instruction_key = _normalize_image_text(instruction)
+    candidate_key = candidate["key"]
+    similarity = SequenceMatcher(None, instruction_key, candidate_key).ratio() if instruction_key and candidate_key else 0
+    contains_match = bool(
+        instruction_key
+        and candidate_key
+        and (instruction_key in candidate_key or candidate_key in instruction_key)
+    )
+
+    score = 0
+    if candidate["number_match"]:
+        score += 1000
+    if instruction_key and candidate_key == instruction_key:
+        score += 300
+    elif contains_match:
+        score += 180
+    score += int(similarity * 100)
+    return score, contains_match or similarity >= 0.6
+
+
+def _pick_image_candidate(candidates, instruction, used_paths=None, strict_text=False):
+    used_paths = set(used_paths or [])
+    scored = []
+    for candidate in candidates:
+        if os.path.abspath(candidate["path"]) in used_paths:
+            continue
+        score, text_match = _score_image_candidate(candidate, instruction)
+        if strict_text and not text_match:
+            continue
+        scored.append((
+            score,
+            candidate["number_match"],
+            candidate["directory_rank"],
+            candidate["name"],
+            candidate["path"],
+        ))
+
+    if not scored:
+        return None
+
+    numbered_candidates = [item for item in scored if item[1]]
+    pool = numbered_candidates or [item for item in scored if item[0] >= 60]
+    if not pool:
+        return None
+
+    best = sorted(pool, key=lambda item: (-item[0], -item[2], item[3]))[0]
+    return os.path.abspath(best[4])
+
+
+def resolve_image_paths(result, mmdd, image_root=DEFAULT_IMAGE_ROOT):
+    """依圖片指示配對一或多張圖片；多張時順序即左右順序。"""
+    if not result or result.get("layout_type") != LAYOUT_IMAGE_TITLE:
+        return [], None
+
+    instruction = result.get("image_instruction", "").strip()
+    if not instruction:
+        return [], "缺少圖片指示"
+
+    candidates, directories, directory_error = _collect_image_candidates(result, mmdd, image_root)
+    if directory_error:
+        return [], directory_error
+
+    if not candidates:
+        searched = "、".join(directories)
+        return [], f"找不到圖片資料夾或圖片檔；已搜尋：{searched}"
+
+    parts = _image_instruction_parts(instruction)
+    image_paths = []
+    used_paths = set()
+    strict_text = len(parts) > 1
+
+    for part in parts:
+        image_path = _pick_image_candidate(candidates, part, used_paths, strict_text)
+        if not image_path:
+            searched = "、".join(directories)
+            return [], f"圖片指示「{part}」找不到可配對圖片；已搜尋：{searched}"
+        image_paths.append(image_path)
+        used_paths.add(os.path.abspath(image_path))
+
+    return image_paths, None
+
+
+def resolve_image_path(result, mmdd, image_root=DEFAULT_IMAGE_ROOT):
+    """相容舊呼叫：回傳第一張配對圖片。"""
+    image_paths, image_error = resolve_image_paths(result, mmdd, image_root)
+    return (image_paths[0] if image_paths else None), image_error
+
+
+def prepare_file_data(file_path, mmdd, image_root=DEFAULT_IMAGE_ROOT):
+    """解析並驗證版型；標圖版同時完成圖片配對。"""
+    result = parse_file(file_path)
+    if not result:
+        return None
+
+    errors = list(result.get("validation_errors", []))
+    if result.get("layout_type") == LAYOUT_IMAGE_TITLE and not errors:
+        image_paths, image_error = resolve_image_paths(result, mmdd, image_root)
+        if image_error:
+            errors.append(image_error)
+        else:
+            result["image_paths"] = image_paths
+            result["image_path"] = image_paths[0] if image_paths else ""
+
+    result["validation_errors"] = errors
+    result["is_valid"] = not errors
+    return result
+
 
 def get_today_mmdd():
     """取得今天的日期，格式為MMDD（月月日日）"""
     today = datetime.now()
     return today.strftime("%m%d")
+
+
+def is_valid_mmdd(value):
+    """檢查字串是否為合理的 MMDD；避免把 1800 之類的時段誤判為日期。"""
+    value = str(value or "").strip()
+    if not re.fullmatch(r"\d{4}", value):
+        return False
+
+    month = int(value[:2])
+    day = int(value[2:])
+    return 1 <= month <= 12 and 1 <= day <= 31
+
+
+def infer_mmdd_from_path(folder_path, fallback=None):
+    """從資料夾路徑推斷 MMDD，找不到時回傳 fallback 或今天。"""
+    path_text = str(folder_path or "")
+    fallback = fallback or get_today_mmdd()
+
+    # 只看路徑段落，避免 IP、檔名或其他數字干擾。
+    parts = [part for part in re.split(r"[\\/]+", path_text) if part]
+    for part in reversed(parts):
+        if is_valid_mmdd(part):
+            return part
+
+    return fallback
 
 
 def find_target_file(base_path):
@@ -64,13 +334,20 @@ def parse_file(file_path):
         "title_line1": "",
         "title_line2": "",
         "color_words": [],
-        "effect_words": []
+        "effect_words": [],
+        "layout_type": LAYOUT_BIG_TITLE,
+        "left_text": "",
+        "image_instruction": "",
+        "image_path": "",
+        "image_paths": [],
+        "validation_errors": [],
+        "is_valid": True,
     }
     
     lines = []
     # 嘗試多種編碼讀取
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
             lines = [line.rstrip('\n\r') for line in f.readlines()]
     except UnicodeDecodeError:
         try:
@@ -102,6 +379,38 @@ def parse_file(file_path):
                     break
             if result["anchor"]:
                 break
+
+        # 2.1 判定版型並解析標圖版欄位。
+        # 舊格式：圖片指示在左邊字上一個非空括號行。
+        # 新格式：(左邊字:文字) / (左邊直字:文字) 優先取下一個非空括號行為圖片指示。
+        left_markers = [
+            (i, marker_info)
+            for i, line in enumerate(lines)
+            for marker_info in [_parse_left_marker(line)]
+            if marker_info
+        ]
+        if left_markers:
+            result["layout_type"] = LAYOUT_IMAGE_TITLE
+            if len(left_markers) > 1:
+                result["validation_errors"].append("找到多個左邊字標記")
+
+            marker_index, marker_info = left_markers[0]
+            left_text = marker_info["left_text"]
+            if not left_text:
+                result["validation_errors"].append("左邊字標記沒有文字內容")
+            result["left_text"] = left_text
+
+            image_instruction = _find_nearby_image_instruction(
+                lines,
+                marker_index,
+                prefer_after=marker_info["embedded"],
+            )
+            if not image_instruction:
+                result["validation_errors"].append(
+                    "找到左邊字標記，但附近找不到完整括號包住的圖片指示"
+                )
+            else:
+                result["image_instruction"] = image_instruction
         
         # 3. 找出最後二行大標文字
         non_empty_lines = []
@@ -125,6 +434,16 @@ def parse_file(file_path):
         
         result["title_line1"] = re.sub(r'\([^)]*\)', '', title1).strip()
         result["title_line2"] = re.sub(r'\([^)]*\)', '', title2).strip()
+
+        for title_label, title_text in (
+            ("第一行大標", result["title_line1"]),
+            ("第二行大標", result["title_line2"]),
+        ):
+            quote_count = title_text.count('"')
+            if quote_count % 2 != 0:
+                result["validation_errors"].append(
+                    f"{title_label}發現未閉合的引號：{title_text}"
+                )
         
         # 4. 找出變色字
         full_text = '\n'.join(lines)
@@ -137,6 +456,9 @@ def parse_file(file_path):
         effect_matches = re.findall(effect_pattern, full_text)
         
         for effect in effect_matches:
+            stripped_effect = effect.strip()
+            if _is_left_marker_effect(stripped_effect) or stripped_effect == result.get("image_instruction"):
+                continue
             should_exclude = False
             for keyword in EXCLUDED_EFFECT_KEYWORDS:
                 if keyword in effect:
@@ -147,6 +469,7 @@ def parse_file(file_path):
                 result["effect_words"].append(effect.strip())
         
         result["effect_words"] = list(set(result["effect_words"]))
+        result["is_valid"] = not result["validation_errors"]
         
         return result
     
