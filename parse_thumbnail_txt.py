@@ -30,10 +30,14 @@ ANCHOR_NAMES = ["林嘉源", "鄭亦真", "張雅婷", "洪淑芬", "麥玉潔",
 
 # 需要排除的效果字關鍵字
 EXCLUDED_EFFECT_KEYWORDS = ["大底黑色", "何橞瑢", "漫畫驚訝調暗暗"]
+# 這些括號內容是版面／效果控制指示，不是圖片名稱。
+# 圖片指示不要求含有「圖」字，因此只排除已知的控制格式。
+NON_IMAGE_INSTRUCTION_KEYWORDS = ["超大字", *EXCLUDED_EFFECT_KEYWORDS]
 
 LAYOUT_BIG_TITLE = "大標版"
 LAYOUT_IMAGE_TITLE = "標圖版"
 DEFAULT_IMAGE_ROOT = r"\\10.227.63.105\public\__CG-IN"
+DEFAULT_TEXT_ROOT = r"\\10.227.58.117\新聞txt"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 LEFT_MARKER_PATTERN = r"左邊(?:直)?字"
 
@@ -41,6 +45,29 @@ LEFT_MARKER_PATTERN = r"左邊(?:直)?字"
 def _is_parenthesized_line(value):
     """整行必須只包含一組半形括號，才視為圖片指示。"""
     return bool(re.fullmatch(r"\([^()]+\)", value.strip()))
+
+
+def _is_non_image_instruction(value):
+    """判斷括號內容是否為效果字或版面控制指示。"""
+    text = str(value or "").strip()
+    if not text:
+        return True
+
+    if any(keyword in text for keyword in NON_IMAGE_INSTRUCTION_KEYWORDS):
+        return True
+
+    # 「定 鄭亦真 不要笑」是定位／控制指示；「定格 美驅逐艦」仍可作為圖片指示。
+    if re.match(r"^定\s+", text):
+        return True
+
+    return False
+
+
+def _extract_explicit_image_instruction(value):
+    """從含「定圖」的指示行取出可能的圖片名稱。"""
+    text = str(value or "").strip()
+    match = re.search(r"定圖\s*[:：]?\s*(.+)$", text)
+    return [part for part in re.split(r"\s+", match.group(1).strip()) if part] if match else []
 
 
 def _parse_left_marker(line):
@@ -87,11 +114,18 @@ def _find_nearby_image_instruction(lines, marker_index, prefer_after=False):
                 index += direction
                 continue
 
-            if _is_parenthesized_line(candidate) and not _parse_left_marker(candidate):
-                return candidate[1:-1].strip()
+            # 有些文字檔會在圖片指示括號前加上 +，例如 +(定圖 用今天 妤史努比)。
+            image_candidate = re.sub(r"^\+\s*", "", candidate)
+            if _is_parenthesized_line(image_candidate) and not _parse_left_marker(image_candidate):
+                content = image_candidate[1:-1].strip()
+                explicit_images = _extract_explicit_image_instruction(content)
+                if explicit_images:
+                    return " ".join(explicit_images), explicit_images
+                if not _is_non_image_instruction(content):
+                    return content, []
             break
 
-    return ""
+    return "", []
 
 
 def _normalize_image_text(value):
@@ -218,7 +252,7 @@ def _pick_image_candidate(candidates, instruction, used_paths=None, strict_text=
 
 
 def resolve_image_paths(result, mmdd, image_root=DEFAULT_IMAGE_ROOT):
-    """依圖片指示配對一或多張圖片；多張時順序即左右順序。"""
+    """依圖片指示配對圖片；多圖缺項時警告並保留其餘已找到圖片。"""
     if not result or result.get("layout_type") != LAYOUT_IMAGE_TITLE:
         return [], None
 
@@ -234,18 +268,48 @@ def resolve_image_paths(result, mmdd, image_root=DEFAULT_IMAGE_ROOT):
         searched = "、".join(directories)
         return [], f"找不到圖片資料夾或圖片檔；已搜尋：{searched}"
 
+    alternatives = [
+        str(part).strip()
+        for part in result.get("image_instruction_candidates", [])
+        if str(part).strip()
+    ]
+    if alternatives:
+        # 「定圖」後以空格分隔的是候選名稱；找到任一張即可繼續。
+        for alternative in alternatives:
+            image_path = _pick_image_candidate(candidates, alternative, strict_text=False)
+            if image_path:
+                return [image_path], None
+        searched = "、".join(directories)
+        return [], f"圖片指示「{'、'.join(alternatives)}」找不到可配對圖片；已搜尋：{searched}"
+
     parts = _image_instruction_parts(instruction)
     image_paths = []
     used_paths = set()
+    used_instruction_keys = set()
+    missing_parts = []
     strict_text = len(parts) > 1
 
     for part in parts:
-        image_path = _pick_image_candidate(candidates, part, used_paths, strict_text)
+        part_key = _normalize_image_text(part)
+        # 相同圖片指示可重複匯入，例如「破裂線」在多人中間出現兩次。
+        paths_to_exclude = None if part_key in used_instruction_keys else used_paths
+        image_path = _pick_image_candidate(candidates, part, paths_to_exclude, strict_text)
         if not image_path:
-            searched = "、".join(directories)
-            return [], f"圖片指示「{part}」找不到可配對圖片；已搜尋：{searched}"
+            if part not in missing_parts:
+                missing_parts.append(part)
+            used_instruction_keys.add(part_key)
+            continue
         image_paths.append(image_path)
         used_paths.add(os.path.abspath(image_path))
+        used_instruction_keys.add(part_key)
+
+    result["image_warnings"] = [
+        f"圖片指示「{part}」找不到可配對圖片，已略過該張圖"
+        for part in missing_parts
+    ]
+    if not image_paths:
+        searched = "、".join(directories)
+        return [], f"所有圖片指示都找不到可配對圖片；已搜尋：{searched}"
 
     return image_paths, None
 
@@ -280,6 +344,19 @@ def get_today_mmdd():
     """取得今天的日期，格式為MMDD（月月日日）"""
     today = datetime.now()
     return today.strftime("%m%d")
+
+
+def get_text_directory_candidates(mmdd, text_root=DEFAULT_TEXT_ROOT):
+    """回傳指定日期的晚報文字資料夾候選路徑。"""
+    if not is_valid_mmdd(mmdd):
+        return []
+
+    date_root = os.path.join(text_root, str(mmdd).strip())
+    return [
+        os.path.join(date_root, "1800"),
+        os.path.join(date_root, "1819"),
+        date_root,
+    ]
 
 
 def is_valid_mmdd(value):
@@ -338,8 +415,10 @@ def parse_file(file_path):
         "layout_type": LAYOUT_BIG_TITLE,
         "left_text": "",
         "image_instruction": "",
+        "image_instruction_candidates": [],
         "image_path": "",
         "image_paths": [],
+        "image_warnings": [],
         "validation_errors": [],
         "is_valid": True,
     }
@@ -400,7 +479,7 @@ def parse_file(file_path):
                 result["validation_errors"].append("左邊字標記沒有文字內容")
             result["left_text"] = left_text
 
-            image_instruction = _find_nearby_image_instruction(
+            image_instruction, image_instruction_candidates = _find_nearby_image_instruction(
                 lines,
                 marker_index,
                 prefer_after=marker_info["embedded"],
@@ -411,6 +490,7 @@ def parse_file(file_path):
                 )
             else:
                 result["image_instruction"] = image_instruction
+                result["image_instruction_candidates"] = image_instruction_candidates
         
         # 3. 找出最後二行大標文字
         non_empty_lines = []
@@ -457,7 +537,11 @@ def parse_file(file_path):
         
         for effect in effect_matches:
             stripped_effect = effect.strip()
-            if _is_left_marker_effect(stripped_effect) or stripped_effect == result.get("image_instruction"):
+            if (
+                _is_left_marker_effect(stripped_effect)
+                or stripped_effect == result.get("image_instruction")
+                or _extract_explicit_image_instruction(stripped_effect)
+            ):
                 continue
             should_exclude = False
             for keyword in EXCLUDED_EFFECT_KEYWORDS:

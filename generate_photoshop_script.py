@@ -8,16 +8,130 @@ import os
 import sys
 import csv
 import argparse
+import io
 import re
 import random
 import json
+import string
+import threading
+import time
+import urllib.request
 from datetime import datetime
+from pathlib import Path
 from parse_thumbnail_txt import (
     DEFAULT_IMAGE_ROOT,
     LAYOUT_IMAGE_TITLE,
     get_today_mmdd,
     prepare_file_data,
 )
+
+
+GOOGLE_COLOR_SHEET_ID = "1-Rs2Y1wE1X8bfJJuO0bUc2e5BG5dXqvioxo5mCH0YVI"
+GOOGLE_COLOR_SHEET_GID = "792890079"
+GOOGLE_COLOR_SHEET_CSV_URL = (
+    f"https://docs.google.com/spreadsheets/d/{GOOGLE_COLOR_SHEET_ID}/"
+    f"export?format=csv&gid={GOOGLE_COLOR_SHEET_GID}"
+)
+LABELED_ASCII_TOKEN_RE = re.compile(rf"[0-9{re.escape(string.punctuation)}]+")
+GOOGLE_COLOR_REFRESH_SECONDS = 300
+
+_color_source_lock = threading.Lock()
+_color_source_last_attempt = 0.0
+_color_source_resolved_path = ""
+_color_source_description = "本地 CSV"
+
+
+def validate_color_scheme_csv_text(csv_text):
+    """確認 Google Sheet 匯出的內容符合現有晚報配色格式。"""
+    try:
+        rows = list(csv.reader(io.StringIO(csv_text)))
+    except csv.Error:
+        return False
+    if not rows or len(rows[0]) < 8 or rows[0][0].strip() != "編號":
+        return False
+
+    scheme_count = 0
+    for index, row in enumerate(rows[1:]):
+        if not row or not row[0].strip():
+            continue
+        if len(row) < 8 or index + 2 >= len(rows):
+            return False
+        second_row = rows[index + 2]
+        if len(second_row) < 8 or second_row[0].strip():
+            return False
+        if not re.fullmatch(r"[A-Za-z]\d{2}", row[0].strip()):
+            return False
+        required_colors = row[2:7] + second_row[2:7]
+        if any(not re.fullmatch(r"#?[0-9a-fA-F]{6}", value.strip()) for value in required_colors):
+            return False
+        scheme_count += 1
+    return scheme_count > 0
+
+
+def get_google_color_cache_path():
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    cache_root = Path(local_app_data) if local_app_data else Path.home() / ".cache"
+    return cache_root / "晚報YT縮圖" / "晚報變色_google.csv"
+
+
+def get_color_scheme_source_description():
+    return _color_source_description
+
+
+def resolve_color_scheme_csv(local_csv_path, force_refresh=False):
+    """優先同步 Google Sheet，離線時使用快取或本地 CSV。"""
+    global _color_source_last_attempt
+    global _color_source_resolved_path
+    global _color_source_description
+
+    local_csv_path = os.path.abspath(local_csv_path)
+    if os.path.basename(local_csv_path).lower() != "晚報變色.csv":
+        return local_csv_path
+
+    with _color_source_lock:
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and _color_source_resolved_path
+            and now - _color_source_last_attempt < GOOGLE_COLOR_REFRESH_SECONDS
+        ):
+            return _color_source_resolved_path
+
+        _color_source_last_attempt = now
+        cache_path = get_google_color_cache_path()
+        try:
+            request = urllib.request.Request(
+                GOOGLE_COLOR_SHEET_CSV_URL,
+                headers={"User-Agent": "EveningYTThumbnail/1.0"},
+            )
+            with urllib.request.urlopen(request, timeout=6) as response:
+                csv_text = response.read().decode("utf-8-sig")
+            if not validate_color_scheme_csv_text(csv_text):
+                raise ValueError("Google Sheet 欄位格式不符合晚報配色規則")
+
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = cache_path.with_suffix(".tmp")
+            temp_path.write_text(csv_text, encoding="utf-8", newline="")
+            os.replace(temp_path, cache_path)
+            _color_source_resolved_path = str(cache_path)
+            _color_source_description = "Google Sheet"
+            print(f"✓ 配色來源: Google Sheet（{GOOGLE_COLOR_SHEET_GID}）")
+            return _color_source_resolved_path
+        except Exception as error:
+            try:
+                cached_text = cache_path.read_text(encoding="utf-8-sig")
+                if validate_color_scheme_csv_text(cached_text):
+                    _color_source_resolved_path = str(cache_path)
+                    _color_source_description = "Google Sheet 快取"
+                    print(f"⚠ Google Sheet 讀取失敗，使用上次快取: {error}")
+                    return _color_source_resolved_path
+            except OSError:
+                pass
+
+            _color_source_resolved_path = local_csv_path
+            _color_source_description = "本地 CSV（Google Sheet 無法連線）"
+            print(f"⚠ Google Sheet 與快取皆無法使用，改用本地 CSV: {error}")
+            return _color_source_resolved_path
 
 # --- UTF-8 for Windows ---
 if sys.platform == 'win32':
@@ -32,10 +146,11 @@ if sys.platform == 'win32':
 
 
 def load_color_schemes(csv_path):
-    """從CSV檔案載入配色方案"""
+    """從 Google Sheet 同步檔、快取或本地 CSV 載入配色方案。"""
     schemes = {}
     try:
-        with open(csv_path, mode='r', encoding='utf-8') as infile:
+        resolved_csv_path = resolve_color_scheme_csv(csv_path)
+        with open(resolved_csv_path, mode='r', encoding='utf-8-sig') as infile:
             reader = csv.reader(infile)
             header = next(reader) # 跳過標頭
             
@@ -60,7 +175,7 @@ def load_color_schemes(csv_path):
                 else:
                     i += 1
     except FileNotFoundError:
-        print(f"錯誤: 找不到顏色設定檔: {csv_path}")
+        print(f"錯誤: 找不到顏色設定檔: {resolved_csv_path}")
         return None
     except Exception as e:
         print(f"讀取CSV時發生錯誤: {e}")
@@ -177,6 +292,13 @@ def _js_string(value):
     return json.dumps(str(value), ensure_ascii=False)
 
 
+def _to_fullwidth_labeled_character(character):
+    """將單一半形數字或標點轉為全形，其他內容原樣保留。"""
+    if len(character) == 1 and 0x21 <= ord(character) <= 0x7E:
+        return chr(ord(character) + 0xFEE0)
+    return character
+
+
 def build_labeled_layout_logic(result_data):
     """建立標圖版專用的左邊字、圖片與尺寸限制 JSX。"""
     left_text = re.sub(r'["“”]', '', result_data.get('left_text', '')).strip()
@@ -184,37 +306,37 @@ def build_labeled_layout_logic(result_data):
     raw_image_paths = result_data.get('image_paths') or ([original_image_path] if original_image_path else [])
     image_paths = [str(path).replace('\\', '/') for path in raw_image_paths if path]
     image_layer_names = [os.path.splitext(os.path.basename(path))[0] for path in raw_image_paths if path]
-    number_matches = list(re.finditer(r'\d+(?:\.\d+)?', left_text))
-    all_single_digits = bool(number_matches) and all(
-        re.fullmatch(r'\d', match.group(0)) for match in number_matches
-    )
-
+    inline_matches = list(LABELED_ASCII_TOKEN_RE.finditer(left_text))
     number_specs = []
-    if all_single_digits:
-        main_left_text = left_text.translate(str.maketrans('0123456789', '０１２３４５６７８９'))
-    elif number_matches:
+    if inline_matches:
         pieces = []
         cursor = 0
         output_length = 0
-        for match in number_matches:
+        for match in inline_matches:
             before = left_text[cursor:match.start()]
             pieces.append(before)
             output_length += len(before)
-            gap_start = output_length
-            pieces.append('  ')
-            output_length += 2
             token = match.group(0)
-            number_specs.append({
-                'text': token,
-                'gap_start': gap_start,
-                'prefix': ''.join(pieces)[:-2],
-                'kerning': 90 if token.isdigit() and len(token) == 2 else 110,
-            })
+            if len(token) == 1:
+                pieces.append(_to_fullwidth_labeled_character(token))
+                output_length += 1
+            else:
+                gap_start = output_length
+                pieces.append('  ')
+                output_length += 2
+                prefix_text = ''.join(pieces)[:-2]
+                number_specs.append({
+                    'text': token,
+                    'gap_start': gap_start,
+                    'prefix': prefix_text,
+                    'kerning': 90 if token.isdigit() and len(token) == 2 else 110,
+                })
             cursor = match.end()
         pieces.append(left_text[cursor:])
         main_left_text = ''.join(pieces)
     else:
         main_left_text = left_text
+    main_text_last_character = main_left_text.rstrip()[-1:] if main_left_text.rstrip() else ''
 
     kerning_calls = []
     number_create_blocks = []
@@ -237,9 +359,15 @@ def build_labeled_layout_logic(result_data):
     numberLayer{index}.name = "直標數字" + ({index} === 0 ? "" : "_{index + 1}");
     numberLayer{index}.textItem.contents = {number_expression};
     numberLayer{index}.textItem.direction = Direction.HORIZONTAL;
+    var numberTargetHeight{index} = measureLabeledGapHeight(verticalTextLayer, {spec['kerning']});
     var numberBounds{index} = labeledLayerBoundsNoEffects(numberLayer{index});
-    if (numberBounds{index}.width > 0) {{
-        numberLayer{index}.resize(250 / numberBounds{index}.width * 100, 100, AnchorPosition.MIDDLECENTER);
+    if (numberBounds{index}.width > 0 && numberBounds{index}.height > 0 &&
+            numberTargetWidth > 0 && numberTargetHeight{index} > 0) {{
+        numberLayer{index}.resize(
+            numberTargetWidth / numberBounds{index}.width * 100,
+            numberTargetHeight{index} / numberBounds{index}.height * 100,
+            AnchorPosition.MIDDLECENTER
+        );
     }}
     numberBounds{index} = labeledLayerBounds(numberLayer{index});
     var numberTargetCenterX{index} = (mainVerticalBounds.left + mainVerticalBounds.right) / 2;
@@ -250,14 +378,23 @@ def build_labeled_layout_logic(result_data):
     );
 """)
         number_finalize_blocks.append(f"""
+    var finalNumberTargetHeight{index} = measureLabeledGapHeight(verticalTextLayer, {spec['kerning']});
     var finalNumberBounds{index} = labeledLayerBoundsNoEffects(numberLayer{index});
-    if (finalNumberBounds{index}.width > 0 && Math.abs(finalNumberBounds{index}.width - 250) > 0.1) {{
-        numberLayer{index}.resize(250 / finalNumberBounds{index}.width * 100, 100, AnchorPosition.MIDDLECENTER);
+    if (finalNumberBounds{index}.width > 0 && finalNumberBounds{index}.height > 0 &&
+            finalNumberTargetWidth > 0 && finalNumberTargetHeight{index} > 0 &&
+            (Math.abs(finalNumberBounds{index}.width - finalNumberTargetWidth) > 0.1 ||
+             Math.abs(finalNumberBounds{index}.height - finalNumberTargetHeight{index}) > 0.1)) {{
+        numberLayer{index}.resize(
+            finalNumberTargetWidth / finalNumberBounds{index}.width * 100,
+            finalNumberTargetHeight{index} / finalNumberBounds{index}.height * 100,
+            AnchorPosition.MIDDLECENTER
+        );
     }}
     mainVerticalBounds = labeledLayerBounds(verticalTextLayer);
     finalNumberBounds{index} = labeledLayerBounds(numberLayer{index});
+    var finalNumberTargetCenterX{index} = (mainVerticalBounds.left + mainVerticalBounds.right) / 2;
     numberLayer{index}.translate(
-        ((mainVerticalBounds.left + mainVerticalBounds.right) / 2) -
+        finalNumberTargetCenterX{index} -
         ((finalNumberBounds{index}.left + finalNumberBounds{index}.right) / 2),
         0
     );
@@ -287,6 +424,51 @@ def build_labeled_layout_logic(result_data):
             width: labeledPx(b[2]) - labeledPx(b[0]),
             height: labeledPx(b[3]) - labeledPx(b[1])
         }};
+    }}
+
+    function measureLabeledCharacterWidth(layer, characterText) {{
+        if (!characterText) return 0;
+        var characterProbe = layer.duplicate();
+        characterProbe.textItem.contents = characterText;
+        var characterBounds = labeledLayerBoundsNoEffects(characterProbe);
+        characterProbe.remove();
+        return characterBounds.width;
+    }}
+
+    function selectLabeledLayerForTransform(layer, addToSelection) {{
+        var selectDescriptor = new ActionDescriptor();
+        var selectReference = new ActionReference();
+        selectReference.putIdentifier(charIDToTypeID("Lyr "), layer.id);
+        selectDescriptor.putReference(charIDToTypeID("null"), selectReference);
+        if (addToSelection) {{
+            selectDescriptor.putEnumerated(
+                stringIDToTypeID("selectionModifier"),
+                stringIDToTypeID("selectionModifierType"),
+                stringIDToTypeID("addToSelection")
+            );
+        }}
+        selectDescriptor.putBoolean(charIDToTypeID("MkVs"), false);
+        executeAction(charIDToTypeID("slct"), selectDescriptor, DialogModes.NO);
+    }}
+
+    function rotateLabeledTextLayersTogether(layers, angle) {{
+        if (!layers || layers.length === 0) return;
+        selectLabeledLayerForTransform(layers[0], false);
+        for (var layerIndex = 1; layerIndex < layers.length; layerIndex++) {{
+            selectLabeledLayerForTransform(layers[layerIndex], true);
+        }}
+        var rotateDescriptor = new ActionDescriptor();
+        var rotateReference = new ActionReference();
+        rotateReference.putEnumerated(
+            charIDToTypeID("Lyr "), charIDToTypeID("Ordn"), charIDToTypeID("Trgt")
+        );
+        rotateDescriptor.putReference(charIDToTypeID("null"), rotateReference);
+        rotateDescriptor.putEnumerated(
+            charIDToTypeID("FTcs"), charIDToTypeID("QCSt"), charIDToTypeID("Qcsa")
+        );
+        rotateDescriptor.putUnitDouble(charIDToTypeID("Angl"), charIDToTypeID("#Ang"), angle);
+        executeAction(charIDToTypeID("Trnf"), rotateDescriptor, DialogModes.NO);
+        doc.activeLayer = layers[0];
     }}
 
     function fitLabeledTitleMaxWidth(layer, maxWidth) {{
@@ -325,26 +507,56 @@ def build_labeled_layout_logic(result_data):
         executeAction(charIDToTypeID("setd"), setDesc, DialogModes.NO);
     }}
 
+    function measureLabeledGapHeight(layer, kerningValue) {{
+        // 以相同的前後定位字比較高度差，只量到兩個空格與 Kerning 的實際進位距離。
+        var compactProbe = layer.duplicate();
+        compactProbe.textItem.contents = "田田";
+        var compactBounds = labeledLayerBoundsNoEffects(compactProbe);
+        compactProbe.remove();
+
+        var gapProbe = layer.duplicate();
+        gapProbe.textItem.contents = "田  田";
+        setLabeledKerning(gapProbe, kerningValue, 2, 3);
+        var gapBounds = labeledLayerBoundsNoEffects(gapProbe);
+        gapProbe.remove();
+        doc.activeLayer = layer;
+        // 保留 5% 陰影安全距離，避免數字圖層壓到下方主文字。
+        return Math.max(0, gapBounds.height - compactBounds.height) * 0.95;
+    }}
+
     // 大標沿用舊流程後，再確保標圖版最終上限。
     if (typeof titleLayer1 !== "undefined") fitLabeledTitleMaxWidth(titleLayer1, 1400);
-    if (typeof titleLayer2 !== "undefined") fitLabeledTitleMaxWidth(titleLayer2, 1280);
+    if (typeof titleLayer2 !== "undefined") fitLabeledTitleMaxWidth(titleLayer2, 1340);
 
-    // 左邊字完全忽略引號變色；一位數全部轉全形，其餘數字另建橫向圖層。
+    // 左邊字完全忽略引號變色；單一半形數字／標點轉全形，連續兩字元以上另建橫向圖層。
     var verticalGroup = findLayer("直標", doc);
     if (!verticalGroup || !verticalGroup.artLayers) throw new Error("找不到群組『直標』");
     var verticalTextLayer = verticalGroup.artLayers.getByName("直標直標");
     verticalTextLayer.textItem.contents = {_js_string(main_left_text)};
 {chr(10).join(kerning_calls)}
     var mainVerticalBounds = labeledLayerBounds(verticalTextLayer);
+    var numberTargetWidth = measureLabeledCharacterWidth(
+        verticalTextLayer, {_js_string(main_text_last_character)}
+    );
 {''.join(number_create_blocks)}
     var verticalGroupBounds = labeledLayerBounds(verticalGroup);
     if (verticalGroupBounds.height > 1000) {{
         var verticalScale = 1000 / verticalGroupBounds.height * 100;
         verticalGroup.resize(verticalScale, verticalScale, AnchorPosition.TOPLEFT);
     }}
+    var finalNumberTargetWidth = measureLabeledCharacterWidth(
+        verticalTextLayer, {_js_string(main_text_last_character)}
+    );
 {''.join(number_finalize_blocks)}
+    var labeledTextLayersToRotate = [verticalTextLayer{''.join(f', numberLayer{i}' for i in range(len(number_specs)))}];
+    rotateLabeledTextLayersTogether(labeledTextLayersToRotate, -4.08);
+    verticalGroupBounds = labeledLayerBounds(verticalGroup);
+    if (verticalGroupBounds.height > 1000) {{
+        verticalScale = 1000 / verticalGroupBounds.height * 100;
+        verticalGroup.resize(verticalScale, verticalScale, AnchorPosition.TOPLEFT);
+    }}
 
-    // 圖片以嵌入式智慧型物件匯入；單圖沿用柔邊遮罩，雙圖用左右拼接與左圖漸層遮罩。
+    // 圖片以嵌入式智慧型物件匯入；單圖沿用柔邊遮罩，雙圖左右拼接，多圖依指示順序全部匯入。
     var labeledImagePaths = {json.dumps(image_paths, ensure_ascii=False)};
     var labeledImageNames = {json.dumps(image_layer_names, ensure_ascii=False)};
     var imageGroup = findLayer("圖片", doc);
@@ -495,7 +707,7 @@ def build_labeled_layout_logic(result_data):
         fitLayerToWidth(imageLayer, 1400);
         centerLayerAt(imageLayer, 960, 260);
         applyContractFeatherMask(imageLayer);
-    }} else {{
+    }} else if (labeledImagePaths.length === 2) {{
         var leftImageLayer = placeLabeledSmartObject(labeledImagePaths[0], labeledImageNames[0]);
         fitLayerToWidth(leftImageLayer, 1400);
         centerLayerAt(leftImageLayer, 960, 260);
@@ -512,6 +724,16 @@ def build_labeled_layout_logic(result_data):
             ((rightImageBounds.top + rightImageBounds.bottom) / 2)
         );
         rightImageLayer.move(leftImageLayer, ElementPlacement.PLACEAFTER);
+    }} else {{
+        // 三張以上使用 Photoshop「置入嵌入的智慧型物件」原始結果，不套用單／雙圖的縮放與拼接。
+        // 反向置入，讓群組由上至下仍維持文字指示的順序。
+        for (var multiImageIndex = labeledImagePaths.length - 1; multiImageIndex >= 0; multiImageIndex--) {{
+            var multiImageLayer = placeLabeledSmartObject(
+                labeledImagePaths[multiImageIndex],
+                labeledImageNames[multiImageIndex]
+            );
+            centerLayerAt(multiImageLayer, 960, 260);
+        }}
     }}
     // --- 標圖版專用流程結束 ---
 """
@@ -944,6 +1166,259 @@ function changeFontSizePart(textLayer, textToChange, newSize) {
     }
 }
 
+function cloneCornerBracketStyle(oldStyle, newSize, baselineShift) {
+    var newStyle = new ActionDescriptor();
+    for (var styleIndex = 0; styleIndex < oldStyle.count; styleIndex++) {
+        var styleKey = oldStyle.getKey(styleIndex);
+        var styleKeyName = typeIDToStringID(styleKey);
+        if (styleKeyName === "size" || styleKeyName === "impliedFontSize") continue;
+        if (baselineShift !== null &&
+                (styleKeyName === "baselineShift" || styleKeyName === "impliedBaselineShift")) continue;
+        var styleType = oldStyle.getType(styleKey);
+        switch (styleType) {
+            case DescValueType.BOOLEANTYPE:
+                newStyle.putBoolean(styleKey, oldStyle.getBoolean(styleKey)); break;
+            case DescValueType.INTEGERTYPE:
+                newStyle.putInteger(styleKey, oldStyle.getInteger(styleKey)); break;
+            case DescValueType.DOUBLETYPE:
+                newStyle.putDouble(styleKey, oldStyle.getDouble(styleKey)); break;
+            case DescValueType.STRINGTYPE:
+                newStyle.putString(styleKey, oldStyle.getString(styleKey)); break;
+            case DescValueType.OBJECTTYPE:
+                newStyle.putObject(styleKey, oldStyle.getObjectType(styleKey), oldStyle.getObjectValue(styleKey)); break;
+            case DescValueType.ENUMERATEDTYPE:
+                newStyle.putEnumerated(
+                    styleKey, oldStyle.getEnumerationType(styleKey), oldStyle.getEnumerationValue(styleKey)
+                ); break;
+            case DescValueType.UNITDOUBLE:
+                newStyle.putUnitDouble(
+                    styleKey, oldStyle.getUnitDoubleType(styleKey), oldStyle.getUnitDoubleValue(styleKey)
+                ); break;
+            case DescValueType.LISTTYPE:
+                newStyle.putList(styleKey, oldStyle.getList(styleKey)); break;
+        }
+    }
+    newStyle.putUnitDouble(stringIDToTypeID("size"), stringIDToTypeID("pointsUnit"), newSize);
+    if (baselineShift !== null) {
+        newStyle.putUnitDouble(
+            stringIDToTypeID("baselineShift"), stringIDToTypeID("pointsUnit"), baselineShift
+        );
+        newStyle.putUnitDouble(
+            stringIDToTypeID("impliedBaselineShift"), stringIDToTypeID("pointsUnit"), baselineShift
+        );
+    }
+    return newStyle;
+}
+
+function setCornerBracketStyleAt(textLayer, characterIndex, newSize, baselineShift) {
+    app.activeDocument.activeLayer = textLayer;
+    var layerReference = new ActionReference();
+    layerReference.putEnumerated(
+        stringIDToTypeID("layer"), stringIDToTypeID("ordinal"), stringIDToTypeID("targetEnum")
+    );
+    var layerDescriptor = executeActionGet(layerReference);
+    var textKey = layerDescriptor.getObjectValue(stringIDToTypeID("textKey"));
+    var styleRanges = textKey.getList(stringIDToTypeID("textStyleRange"));
+    var sourceStyle = null;
+    for (var rangeIndex = 0; rangeIndex < styleRanges.count; rangeIndex++) {
+        var sourceRange = styleRanges.getObjectValue(rangeIndex);
+        var rangeFrom = sourceRange.getInteger(stringIDToTypeID("from"));
+        var rangeTo = sourceRange.getInteger(stringIDToTypeID("to"));
+        if (characterIndex >= rangeFrom && characterIndex < rangeTo) {
+            sourceStyle = sourceRange.getObjectValue(stringIDToTypeID("textStyle"));
+            break;
+        }
+    }
+    if (!sourceStyle) return;
+
+    var targetRange = new ActionDescriptor();
+    targetRange.putInteger(stringIDToTypeID("from"), characterIndex);
+    targetRange.putInteger(stringIDToTypeID("to"), characterIndex + 1);
+    targetRange.putObject(
+        stringIDToTypeID("textStyle"),
+        stringIDToTypeID("textStyle"),
+        cloneCornerBracketStyle(sourceStyle, newSize, baselineShift)
+    );
+    var targetRanges = new ActionList();
+    targetRanges.putObject(stringIDToTypeID("textStyleRange"), targetRange);
+    var targetText = new ActionDescriptor();
+    targetText.putList(stringIDToTypeID("textStyleRange"), targetRanges);
+    var setDescriptor = new ActionDescriptor();
+    var targetReference = new ActionReference();
+    targetReference.putEnumerated(
+        stringIDToTypeID("textLayer"), stringIDToTypeID("ordinal"), stringIDToTypeID("targetEnum")
+    );
+    setDescriptor.putReference(stringIDToTypeID("null"), targetReference);
+    setDescriptor.putObject(stringIDToTypeID("to"), stringIDToTypeID("textLayer"), targetText);
+    executeAction(stringIDToTypeID("set"), setDescriptor, DialogModes.NO);
+}
+
+function setTitlePercentSignsSize(textLayer, content, fixedFontSize) {
+    app.activeDocument.activeLayer = textLayer;
+    var layerReference = new ActionReference();
+    layerReference.putEnumerated(
+        stringIDToTypeID("layer"), stringIDToTypeID("ordinal"), stringIDToTypeID("targetEnum")
+    );
+    var layerDescriptor = executeActionGet(layerReference);
+    var textKey = layerDescriptor.getObjectValue(stringIDToTypeID("textKey"));
+    var styleRanges = textKey.getList(stringIDToTypeID("textStyleRange"));
+    var targetRanges = new ActionList();
+    var percentCount = 0;
+    for (var characterIndex = 0; characterIndex < content.length; characterIndex++) {
+        if (content.charAt(characterIndex) !== "%") continue;
+        var sourceStyle = null;
+        for (var rangeIndex = 0; rangeIndex < styleRanges.count; rangeIndex++) {
+            var sourceRange = styleRanges.getObjectValue(rangeIndex);
+            var rangeFrom = sourceRange.getInteger(stringIDToTypeID("from"));
+            var rangeTo = sourceRange.getInteger(stringIDToTypeID("to"));
+            if (characterIndex >= rangeFrom && characterIndex < rangeTo) {
+                sourceStyle = sourceRange.getObjectValue(stringIDToTypeID("textStyle"));
+                break;
+            }
+        }
+        if (!sourceStyle) continue;
+
+        var targetRange = new ActionDescriptor();
+        targetRange.putInteger(stringIDToTypeID("from"), characterIndex);
+        targetRange.putInteger(stringIDToTypeID("to"), characterIndex + 1);
+        targetRange.putObject(
+            stringIDToTypeID("textStyle"),
+            stringIDToTypeID("textStyle"),
+            cloneCornerBracketStyle(sourceStyle, fixedFontSize, null)
+        );
+        targetRanges.putObject(stringIDToTypeID("textStyleRange"), targetRange);
+        percentCount++;
+    }
+    if (percentCount === 0) return;
+    var targetText = new ActionDescriptor();
+    targetText.putList(stringIDToTypeID("textStyleRange"), targetRanges);
+    var setDescriptor = new ActionDescriptor();
+    var targetReference = new ActionReference();
+    targetReference.putEnumerated(
+        stringIDToTypeID("textLayer"), stringIDToTypeID("ordinal"), stringIDToTypeID("targetEnum")
+    );
+    setDescriptor.putReference(stringIDToTypeID("null"), targetReference);
+    setDescriptor.putObject(stringIDToTypeID("to"), stringIDToTypeID("textLayer"), targetText);
+    executeAction(stringIDToTypeID("set"), setDescriptor, DialogModes.NO);
+}
+
+function setTitleKerningAtRangePosition(textLayer, value, rangePosition) {
+    app.activeDocument.activeLayer = textLayer;
+    var layerReference = new ActionReference();
+    layerReference.putEnumerated(
+        charIDToTypeID("Lyr "), charIDToTypeID("Ordn"), charIDToTypeID("Trgt")
+    );
+    var layerDescriptor = executeActionGet(layerReference);
+    var textDescriptor = layerDescriptor.getObjectValue(stringIDToTypeID("textKey"));
+    var kerningRangeID = stringIDToTypeID("kerningRange");
+    var idFrom = charIDToTypeID("From");
+    var idTo = charIDToTypeID("T   ");
+    var idKerning = charIDToTypeID("Krng");
+    var textLength = textDescriptor.getString(stringIDToTypeID("textKey")).length;
+    if (rangePosition < 0 || rangePosition >= textLength) return;
+    var kerningValues = [];
+    if (textDescriptor.hasKey(kerningRangeID)) {
+        var existingRanges = textDescriptor.getList(kerningRangeID);
+        for (var kerningIndex = 0; kerningIndex < existingRanges.count; kerningIndex++) {
+            var existingRange = existingRanges.getObjectValue(kerningIndex);
+            var existingFrom = existingRange.getInteger(idFrom);
+            var existingTo = existingRange.getInteger(idTo);
+            var existingValue = existingRange.getInteger(idKerning);
+            for (var existingPosition = existingFrom;
+                    existingPosition < existingTo && existingPosition < textLength;
+                    existingPosition++) {
+                if (existingPosition >= 0) {
+                    kerningValues[existingPosition] = existingValue;
+                }
+            }
+        }
+    }
+    kerningValues[rangePosition] = value;
+
+    // 只重建 PSD 原本明確存在的插入點與本次目標，不用大段 0 Kerning
+    // 覆蓋其他位置。Photoshop 對多個 kerningRange 有順序問題：必須從
+    // 後往前寫入，否則前面的範圍（本案就是「前方）可能被忽略。
+    var kerningRanges = new ActionList();
+    var rangeEnd = textLength;
+    while (rangeEnd > 0) {
+        var rangeStart = rangeEnd - 1;
+        if (typeof kerningValues[rangeStart] === "undefined") {
+            rangeEnd--;
+            continue;
+        }
+        var rangeValue = kerningValues[rangeStart];
+        while (rangeStart > 0 && kerningValues[rangeStart - 1] === rangeValue) {
+            rangeStart--;
+        }
+        var kerningDescriptor = new ActionDescriptor();
+        kerningDescriptor.putInteger(idFrom, rangeStart);
+        kerningDescriptor.putInteger(idTo, rangeEnd);
+        kerningDescriptor.putInteger(idKerning, rangeValue);
+        kerningRanges.putObject(kerningRangeID, kerningDescriptor);
+        rangeEnd = rangeStart;
+    }
+    textDescriptor.putList(kerningRangeID, kerningRanges);
+    var setDescriptor = new ActionDescriptor();
+    var targetReference = new ActionReference();
+    targetReference.putEnumerated(
+        charIDToTypeID("TxLr"), charIDToTypeID("Ordn"), charIDToTypeID("Trgt")
+    );
+    setDescriptor.putReference(charIDToTypeID("null"), targetReference);
+    setDescriptor.putObject(charIDToTypeID("T   "), charIDToTypeID("TxLr"), textDescriptor);
+    executeAction(charIDToTypeID("setd"), setDescriptor, DialogModes.NO);
+}
+
+function formatCornerBrackets(textLayer, percentFontSize) {
+    if (!textLayer) return;
+    var content = textLayer.textItem.contents;
+    var contentWithoutTrailingWhitespace = content.replace(/\\s+$/, "");
+    for (var characterIndex = 0; characterIndex < content.length; characterIndex++) {
+        var character = content.charAt(characterIndex);
+        if (character === "「") {
+            setCornerBracketStyleAt(textLayer, characterIndex, 400, 80);
+        } else if (character === "」") {
+            setCornerBracketStyleAt(textLayer, characterIndex, 400, null);
+        }
+    }
+    // % 使用版型固定字級；同行多個 % 在同一個 ActionList 一次寫入。
+    setTitlePercentSignsSize(textLayer, content, percentFontSize);
+    var openingHasTextBefore = false;
+    var leadingOpeningBracket = content.length > 0 && content.charAt(0) === "「";
+    for (var kerningCharacterIndex = 0; kerningCharacterIndex < content.length; kerningCharacterIndex++) {
+        var kerningCharacter = content.charAt(kerningCharacterIndex);
+        if (kerningCharacter === "「") {
+            openingHasTextBefore = kerningCharacterIndex > 0;
+            if (openingHasTextBefore) {
+                // 「前面真的有文字時，才設定「前方 Kerning -300。
+                setTitleKerningAtRangePosition(textLayer, -300, kerningCharacterIndex - 1);
+            }
+        } else if (kerningCharacter === "」") {
+            if (openingHasTextBefore) {
+                // 對應的「前方有文字時，」後方也設定 Kerning -300。
+                setTitleKerningAtRangePosition(textLayer, -300, kerningCharacterIndex + 1);
+            }
+            openingHasTextBefore = false;
+        }
+    }
+    if (contentWithoutTrailingWhitespace.length > 0 &&
+            contentWithoutTrailingWhitespace.charAt(contentWithoutTrailingWhitespace.length - 1) === "」") {
+        // 」後方沒有文字：固定大標左側，只將寬度往右增加 70px。
+        var titleBounds = textLayer.bounds;
+        var titleWidth = titleBounds[2].as("px") - titleBounds[0].as("px");
+        if (titleWidth > 0) {
+            textLayer.resize(
+                (titleWidth + 70) / titleWidth * 100,
+                100,
+                AnchorPosition.MIDDLELEFT
+            );
+        }
+    }
+    if (leadingOpeningBracket) {
+        // 行首「前方沒有文字：不設 Kerning，整行固定向左移 140px。
+        textLayer.translate(-140, 0);
+    }
+}
+
 function findLayer(name, parent) {
     for (var i = 0; i < parent.layers.length; i++) {
         var layer = parent.layers[i];
@@ -1217,9 +1692,13 @@ try {
         TITLE_RESIZE_LOGIC_PLACEHOLDER
         
         // EFFECT_WORDS_LOGIC_PLACEHOLDER
+
+        // 中文引號縮小並收緊前後字距。
+        formatCornerBrackets(titleLayer1, PERCENT_FONT_SIZE_PLACEHOLDER);
+        formatCornerBrackets(titleLayer2, PERCENT_FONT_SIZE_PLACEHOLDER);
         
-        // 設定第一行大標最後一個字的基線位移 (-17.88px) - 在 resize 之後執行
-        setLastCharBaselineShift(titleLayer1, -17.88);
+        // 設定第一行大標最後一個字的基線位移，在 resize 之後執行。
+        setLastCharBaselineShift(titleLayer1, TITLE1_BASELINE_SHIFT_PLACEHOLDER);
     } else {
         alert("警告: 找不到 '標' 圖層群組");
     }
@@ -1471,21 +1950,25 @@ try {
 
     is_labeled_layout = result_data.get('layout_type') == LAYOUT_IMAGE_TITLE
     if is_labeled_layout:
-        # 沿用原本大標1的1380px；大標2在標圖版改為1280px。
+        # 沿用原本大標1的1380px；大標2在標圖版改為1340px。
         title_resize_logic = (
             'titleLayer1.resize(1380 / (titleLayer1.bounds[2] - titleLayer1.bounds[0]) * 100, '
             '100, AnchorPosition.MIDDLELEFT);\n'
-            '        titleLayer2.resize(1280 / (titleLayer2.bounds[2] - titleLayer2.bounds[0]) * 100, '
+            '        titleLayer2.resize(1340 / (titleLayer2.bounds[2] - titleLayer2.bounds[0]) * 100, '
             '100, AnchorPosition.MIDDLELEFT);'
         )
+        title1_baseline_shift = -17.88
+        percent_font_size = 200
         layout_specific_logic = build_labeled_layout_logic(result_data)
     else:
         title_resize_logic = (
-            'titleLayer1.resize(1380 / (titleLayer1.bounds[2] - titleLayer1.bounds[0]) * 100, '
+            'titleLayer1.resize(1500 / (titleLayer1.bounds[2] - titleLayer1.bounds[0]) * 100, '
             '100, AnchorPosition.MIDDLELEFT);\n'
             '        titleLayer2.resize(1560 / (titleLayer2.bounds[2] - titleLayer2.bounds[0]) * 100, '
             '100, AnchorPosition.MIDDLELEFT);'
         )
+        title1_baseline_shift = -30
+        percent_font_size = 350
         layout_specific_logic = ''
 
     # Perform replacements manually
@@ -1507,6 +1990,8 @@ try {
         "SPECIAL_TEXT_3": special_text_3,
         "EFFECT_WORDS_LOGIC_PLACEHOLDER": effect_words_logic,
         "TITLE_RESIZE_LOGIC_PLACEHOLDER": title_resize_logic,
+        "TITLE1_BASELINE_SHIFT_PLACEHOLDER": title1_baseline_shift,
+        "PERCENT_FONT_SIZE_PLACEHOLDER": percent_font_size,
         "LAYOUT_SPECIFIC_LOGIC_PLACEHOLDER": layout_specific_logic,
         "LINE2_SPECIAL1_COLOR": line2_colors['special1'],
         "SPECIAL_TEXT_4": special_text_4,
@@ -1536,6 +2021,9 @@ def run_generation_logic(
     source_date=None,
     labeled_psd_path=None,
     image_root=DEFAULT_IMAGE_ROOT,
+    result_overrides=None,
+    top_right_color_override=None,
+    generation_report=None,
 ):
     """執生成邏輯，方便外部調用"""
     
@@ -1584,6 +2072,11 @@ def run_generation_logic(
     if not result:
         print("解析失敗")
         return 1
+
+    # GUI 可針對單一縮圖覆寫文字設定；不改寫原始文字檔。
+    for key in ("anchor", "left_text", "title_line1", "title_line2"):
+        if result_overrides and key in result_overrides:
+            result[key] = str(result_overrides[key])
 
     if result.get('validation_errors'):
         print("\n⚠ 此檔案略過：")
@@ -1653,7 +2146,10 @@ def run_generation_logic(
          
     top_right_colors = load_top_right_colors(top_right_csv)
     top_right_selected = None
-    if top_right_colors:
+    if top_right_color_override:
+        top_right_selected = str(top_right_color_override).strip().lstrip("#")
+        print(f"✓ 使用指定的右上色塊顏色: {top_right_selected}")
+    elif top_right_colors:
         top_right_selected = select_top_right_color(color_id, top_right_colors)
     
     # 載入效果字處理方案
@@ -1680,6 +2176,14 @@ def run_generation_logic(
         effect_map,
         effective_date,
     )
+
+    if generation_report is not None:
+        generation_report.update({
+            "color_id": color_id,
+            "color_scheme": selected_scheme,
+            "top_right_color": top_right_selected or "",
+            "result": result,
+        })
     
     mmdd = effective_date
     

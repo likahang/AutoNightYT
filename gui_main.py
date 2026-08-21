@@ -8,6 +8,9 @@ Modern Dark Mode with Neon Accent Colors
 import sys
 import os
 import json
+import math
+import random
+import xml.etree.ElementTree as ET
 from worker import GenerationWorker
 import re
 from datetime import datetime
@@ -18,14 +21,47 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
     QTextEdit, QSplitter, QCheckBox, QSpinBox, QComboBox,
     QScrollArea, QFrame, QProgressBar, QMenuBar, QMenu, QMessageBox,
-    QFileDialog, QGridLayout
+    QFileDialog, QGridLayout, QFormLayout
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QElapsedTimer, QRectF, QByteArray
 from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QCursor, QPainter
+from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtCore import QSize
 import subprocess
 import glob
-from parse_thumbnail_txt import infer_mmdd_from_path, is_valid_mmdd
+from parse_thumbnail_txt import (
+    ANCHOR_NAMES,
+    get_text_directory_candidates,
+    infer_mmdd_from_path,
+    is_valid_mmdd,
+    parse_file,
+    prepare_file_data,
+)
+from generate_photoshop_script import (
+    get_color_scheme_source_description,
+    load_color_schemes,
+    load_top_right_colors,
+)
+
+
+UNRECORDED_CONFIG = "未記錄"
+
+
+def format_generation_stats(pending, completed, failed):
+    return f"待生成: {pending} ｜ 已完成: {completed} ｜ 失敗: {failed}"
+
+
+def resolve_visual_config(override=None, resolved=None, persisted=None):
+    """依自訂、已完成生成、歷史紀錄的順序取得縮圖實際設定。"""
+    sources = (override or {}, resolved or {}, persisted or {})
+    visual = {}
+    for key in ("color_id", "top_right_color"):
+        for source in sources:
+            value = str(source.get(key, "") or "").strip()
+            if value:
+                visual[key] = value
+                break
+    return visual
 
 # ===== 配色方案 =====
 class DarkTheme:
@@ -280,8 +316,129 @@ class FileListWidget(QListWidget):
         super().mousePressEvent(event)
 
 
+class CGLoadingOverlay(QWidget):
+    """在縮圖上透明播放 CGLoading SVG 的描線動畫。"""
+
+    DEFAULT_SVG_PATH = Path.home() / "Documents" / "CGLoading" / "cg-indigo-loader.svg"
+
+    def __init__(self, parent=None, svg_path=None):
+        super().__init__(parent)
+        self.svg_path = Path(svg_path or self.DEFAULT_SVG_PATH)
+        self.path_data = self._load_path_data()
+        self.elapsed = QElapsedTimer()
+        self.timer = QTimer(self)
+        self.timer.setInterval(33)
+        self.timer.timeout.connect(self.update)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.hide()
+
+    def _load_path_data(self):
+        """從指定 SVG 讀取兩段 CG 路徑，避免複製另一份動畫資產。"""
+        try:
+            root = ET.parse(self.svg_path).getroot()
+            paths = [
+                element.attrib.get("d", "")
+                for element in root.iter()
+                if element.tag.rsplit("}", 1)[-1] == "path" and element.attrib.get("d")
+            ]
+            if len(paths) >= 4:
+                return paths[0], paths[1], paths[2], paths[3]
+        except (OSError, ET.ParseError):
+            pass
+        return None
+
+    def start(self):
+        """開始動畫；資產不存在時交由呼叫端顯示文字備援。"""
+        if not self.path_data:
+            return False
+        self.elapsed.start()
+        self.show()
+        self.raise_()
+        self.timer.start()
+        self.update()
+        return True
+
+    def stop(self):
+        self.timer.stop()
+        self.hide()
+
+    @staticmethod
+    def _ease(progress):
+        progress = max(0.0, min(1.0, progress))
+        return 0.5 - math.cos(math.pi * progress) / 2
+
+    @classmethod
+    def _between(cls, phase, start, end, start_value, end_value):
+        if phase <= start:
+            return start_value
+        if phase >= end:
+            return end_value
+        progress = cls._ease((phase - start) / (end - start))
+        return start_value + (end_value - start_value) * progress
+
+    def _render_svg(self, phase):
+        track1, track2, anim1, anim2 = self.path_data
+
+        if phase < 0.25:
+            offset1 = self._between(phase, 0.0, 0.25, 1000, 0)
+        elif phase < 0.50:
+            offset1 = 0
+        elif phase < 0.65:
+            offset1 = self._between(phase, 0.50, 0.65, 0, 1000)
+        else:
+            offset1 = 1000
+
+        if phase < 0.25:
+            offset2 = 1000
+            opacity2 = 1
+        elif phase < 0.50:
+            offset2 = self._between(phase, 0.25, 0.50, 1000, 0)
+            opacity2 = 1
+        elif phase < 0.75:
+            offset2 = 0
+            opacity2 = 1
+        elif phase < 0.90:
+            offset2 = self._between(phase, 0.75, 0.90, 0, -1000)
+            opacity2 = 1
+        else:
+            offset2 = -1000
+            opacity2 = max(0.0, 1.0 - (phase - 0.90) / 0.05)
+
+        svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="600 330 200 120">
+<g fill="none" stroke="#6366f1" stroke-width="7" stroke-miterlimit="10" opacity="0.2">
+<path d="{track1}"/><path d="{track2}"/>
+</g>
+<g fill="none" stroke="#6366f1" stroke-width="7" stroke-linecap="round" stroke-miterlimit="10" stroke-dasharray="1000">
+<path d="{anim1}" stroke-dashoffset="{offset1:.2f}"/>
+<path d="{anim2}" stroke-dashoffset="{offset2:.2f}" opacity="{opacity2:.3f}"/>
+</g></svg>'''
+        return QSvgRenderer(QByteArray(svg.encode("utf-8")))
+
+    def paintEvent(self, event):
+        if not self.path_data or not self.elapsed.isValid():
+            return
+        phase = (self.elapsed.elapsed() % 4000) / 4000.0
+        renderer = self._render_svg(phase)
+        if not renderer.isValid():
+            return
+
+        width = min(200.0, max(100.0, self.width() * 0.55))
+        height = width * 0.60
+        target = QRectF(
+            (self.width() - width) / 2,
+            (self.height() - height) / 2,
+            width,
+            height,
+        )
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        renderer.render(painter, target)
+
+
 class AspectRatioLabel(QLabel):
     """保持寬高比的標籤"""
+    clicked = pyqtSignal()
     double_clicked = pyqtSignal()
 
     def __init__(self, text="", parent=None):
@@ -291,6 +448,9 @@ class AspectRatioLabel(QLabel):
         from PyQt6.QtWidgets import QSizePolicy
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.original_pixmap = None
+        self.loading_overlay = None
+        self.loading_active = False
+        self.loading_fallback_text = ""
 
     def setPixmap(self, p):
         self.original_pixmap = p
@@ -299,6 +459,12 @@ class AspectRatioLabel(QLabel):
     def setText(self, text):
         self.original_pixmap = None
         super().setText(text)
+
+    def setLoading(self, active, fallback_text=""):
+        """重新生成時暫時隱藏縮圖，但保留原圖供失敗時恢復。"""
+        self.loading_active = active
+        self.loading_fallback_text = fallback_text if active else ""
+        self.update()
     
     def hasHeightForWidth(self):
         """告訴 Layout 系統我們有基於寬度的高度計算"""
@@ -309,6 +475,17 @@ class AspectRatioLabel(QLabel):
         return int(width * 9 / 16)
         
     def paintEvent(self, event):
+        if self.loading_active:
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), QColor(DarkTheme.BG_TERTIARY))
+            if self.loading_fallback_text:
+                painter.setPen(QColor(DarkTheme.TEXT_SECONDARY))
+                painter.drawText(
+                    self.rect(),
+                    Qt.AlignmentFlag.AlignCenter,
+                    self.loading_fallback_text,
+                )
+            return
         if self.original_pixmap and not self.original_pixmap.isNull():
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
@@ -332,6 +509,11 @@ class AspectRatioLabel(QLabel):
         else:
             super().paintEvent(event)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.loading_overlay:
+            self.loading_overlay.setGeometry(self.rect())
+
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.double_clicked.emit()
@@ -339,11 +521,17 @@ class AspectRatioLabel(QLabel):
             return
         super().mouseDoubleClickEvent(event)
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
 
 class ThumbnailGridWidget(QWidget):
     """縮圖網格展示小部件（4 列排列）"""
     # 信號：重新處理請求
     reprocess_requested = pyqtSignal(str)  # (filename)
+    thumbnail_selected = pyqtSignal(str)  # (filename)
     
     def __init__(self, parent_window=None):
         super().__init__()
@@ -466,10 +654,14 @@ class ThumbnailGridWidget(QWidget):
         status_label.setMinimumHeight(100)
         status_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         status_label.setToolTip("雙擊開啟對應 PSD")
+        status_label.clicked.connect(partial(self.thumbnail_selected.emit, name))
         status_label.double_clicked.connect(partial(self.open_psd_for_thumbnail, name))
         # 設定 expanding 策略，讓圖片可以隨視窗放大
         from PyQt6.QtWidgets import QSizePolicy
         status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        loading_overlay = CGLoadingOverlay(status_label)
+        status_label.loading_overlay = loading_overlay
+        loading_overlay.setGeometry(status_label.rect())
         
         frame_layout.addLayout(top_layout)
         frame_layout.addWidget(status_label)
@@ -483,6 +675,7 @@ class ThumbnailGridWidget(QWidget):
         self.thumbnails[name] = {
             "frame": frame, 
             "status_label": status_label,
+            "loading_overlay": loading_overlay,
             "reprocess_btn": reprocess_btn,
             "status": "waiting",
             "jpg_path": None,
@@ -495,6 +688,28 @@ class ThumbnailGridWidget(QWidget):
             self.parent_window.on_reprocess_requested(filename)
         else:
             self.reprocess_requested.emit(filename)
+
+    def show_reprocess_loading(self, name):
+        """重新生成時隱藏縮圖，只顯示 CG loading 動畫。"""
+        info = self.thumbnails.get(name)
+        if not info:
+            return
+        overlay = info.get("loading_overlay")
+        animation_started = bool(overlay and overlay.start())
+        info["status_label"].setLoading(
+            True,
+            "" if animation_started else "⏳ 重新生成中...",
+        )
+        info["status"] = "processing"
+
+    def stop_loading(self, name):
+        info = self.thumbnails.get(name)
+        if not info:
+            return
+        overlay = info.get("loading_overlay")
+        if overlay:
+            overlay.stop()
+        info["status_label"].setLoading(False)
 
     def find_psd_for_jpg(self, jpg_path):
         """從縮圖 JPG 路徑推回對應的 PSD 路徑"""
@@ -593,6 +808,7 @@ class ThumbnailGridWidget(QWidget):
             
             if not pixmap.isNull():
                 # 使用 AspectRatioLabel 自動縮放
+                self.stop_loading(name)
                 status_label.setPixmap(pixmap)
                 status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.thumbnails[name]["status"] = "completed"
@@ -608,11 +824,13 @@ class ThumbnailGridWidget(QWidget):
                     if retry_count == 0:
                         status_label.setText("⏳ 載入中...")
                 else:
+                    self.stop_loading(name)
                     status_label.setText("❌ 圖像載入失敗")
                     # 即使顯示失敗，也啟用按鈕讓使用者可以重試
                     reprocess_btn.setEnabled(True)
                     
         except Exception as e:
+            self.stop_loading(name)
             status_label.setText(f"❌ 錯誤")
             reprocess_btn.setEnabled(True)
     
@@ -628,6 +846,7 @@ class ThumbnailGridWidget(QWidget):
         
         try:
             status_label = self.thumbnails[name]["status_label"]
+            self.stop_loading(name)
             status_label.setText("❌ 生成失敗")
             status_label.setStyleSheet(f"color: {DarkTheme.ACCENT_RED};")
             self.thumbnails[name]["status"] = "failed"
@@ -648,8 +867,31 @@ class MainWindow(QMainWindow):
         
         # 工作線程
         self.worker = None
+        self.thumbnail_overrides = {}
+        self.resolved_thumbnail_configs = {}
+        self.pending_thumbnail_configs = {}
+        self.active_reprocess_filename = None
+        self.batch_generation_active = False
+        self.batch_pending_files = set()
+        self.batch_completed_files = set()
+        self.batch_failed_files = set()
+        self.selected_thumbnail_filename = None
+        self.config_folder = None
+        self.color_schemes = self.load_available_color_schemes()
+        self.top_right_colors = self.load_available_top_right_colors()
         
         self.init_ui()
+        self.add_log(f"🎨 配色來源: {get_color_scheme_source_description()}")
+
+    def load_available_color_schemes(self):
+        """載入右欄可選用的大標配色。"""
+        base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+        return load_color_schemes(str(base_path / "晚報變色.csv")) or {}
+
+    def load_available_top_right_colors(self):
+        """載入右欄可使用的右上變色色碼。"""
+        base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+        return load_top_right_colors(str(base_path / "右上變色.csv")) or {}
     
     def load_settings(self):
         """載入保存的設定"""
@@ -687,6 +929,7 @@ class MainWindow(QMainWindow):
         self.date_input = QLineEdit()
         self.date_input.setText(datetime.now().strftime("%m%d"))
         self.date_input.setMaximumWidth(100)
+        self.date_input.returnPressed.connect(self.on_date_entered)
         
         # 製作者
         creator_label = QLabel("👤 製作者:")
@@ -729,7 +972,12 @@ class MainWindow(QMainWindow):
         content_layout = QHBoxLayout()
         
         # ===== 左側：文件列表 =====
+        self.file_list_default_width = 300
+        self.file_list_auto_max_width = 560
         left_frame = QFrame()
+        left_frame.setMinimumWidth(self.file_list_default_width)
+        left_frame.setMaximumWidth(self.file_list_default_width)
+        self.left_frame = left_frame
         left_layout = QVBoxLayout(left_frame)
         
         left_title = QLabel("📁 文字檔案")
@@ -740,6 +988,8 @@ class MainWindow(QMainWindow):
         browse_btn.clicked.connect(self.on_browse_folder)
         
         self.file_list = FileListWidget()
+        self.file_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.file_list.itemDoubleClicked.connect(self.on_file_double_clicked)
         
         file_ops_layout = QHBoxLayout()
         all_btn = QPushButton("全選")
@@ -777,22 +1027,29 @@ class MainWindow(QMainWindow):
         right_title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
         right_title.setStyleSheet(f"color: {DarkTheme.ACCENT_PINK};")
         
-        self.stats_label = QLabel("待生成: 0 | 已完成: 0 | 失敗: 0")
+        self.stats_label = QLabel(format_generation_stats(0, 0, 0))
         self.stats_label.setFont(QFont("Arial", 10))
         self.stats_label.setStyleSheet(f"color: {DarkTheme.TEXT_SECONDARY};")
+
+        right_header_layout = QHBoxLayout()
+        right_header_layout.setContentsMargins(0, 0, 0, 0)
+        right_header_layout.addWidget(right_title)
+        right_header_layout.addStretch()
+        right_header_layout.addWidget(self.stats_label)
         
         self.scroll = QScrollArea()
         self.thumbnail_grid = ThumbnailGridWidget(parent_window=self)
         self.thumbnail_grid.reprocess_requested.connect(self.on_reprocess_requested)
+        self.thumbnail_grid.thumbnail_selected.connect(self.on_thumbnail_selected)
         self.scroll.setWidget(self.thumbnail_grid)
         self.scroll.setWidgetResizable(True)
         
-        right_layout.addWidget(right_title)
-        right_layout.addWidget(self.stats_label)
+        right_layout.addLayout(right_header_layout)
         right_layout.addWidget(self.scroll)
         
-        content_layout.addWidget(left_frame, 1)
-        content_layout.addWidget(right_frame, 3)
+        content_layout.addWidget(left_frame, 9)
+        content_layout.addWidget(right_frame, 42)
+        content_layout.addWidget(self.create_thumbnail_config_panel(), 9)
         main_layout.addLayout(content_layout)
         
         # ===== 進度條 =====
@@ -826,6 +1083,182 @@ class MainWindow(QMainWindow):
         
         # 自動載入預設路徑中的文件
         self.auto_load_default_folder()
+
+    def create_thumbnail_config_panel(self):
+        """建立右側的單張縮圖設定面板。"""
+        self.config_default_width = 300
+        self.config_auto_max_width = 560
+        panel = QFrame()
+        panel.setMinimumWidth(220)
+        panel.setMaximumWidth(self.config_default_width)
+        panel.setVisible(False)
+        self.thumbnail_config_panel = panel
+        outer = QVBoxLayout(panel)
+
+        title = QLabel("🎛 縮圖設定")
+        title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {DarkTheme.ACCENT_PURPLE};")
+        outer.addWidget(title)
+
+        self.config_selected_label = QLabel("請點擊中間的縮圖")
+        self.config_selected_label.setWordWrap(True)
+        self.config_selected_label.setStyleSheet(f"color: {DarkTheme.TEXT_SECONDARY};")
+        outer.addWidget(self.config_selected_label)
+
+        config_scroll = QScrollArea()
+        config_scroll.setWidgetResizable(True)
+        config_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.config_scroll = config_scroll
+        self.config_form_widget = QWidget()
+        form = QFormLayout(self.config_form_widget)
+        self.config_form_layout = form
+        form.setContentsMargins(4, 4, 4, 4)
+        form.setSpacing(8)
+
+        self.config_layout_value = QLineEdit()
+        self.config_layout_value.setReadOnly(True)
+        form.addRow("版型", self.config_layout_value)
+
+        self.config_color_combo = QComboBox()
+        self.config_color_combo.addItems(sorted(self.color_schemes.keys()))
+        self.config_color_combo.currentTextChanged.connect(self.on_config_color_changed)
+        form.addRow("配色", self.config_color_combo)
+
+        self.config_anchor_combo = QComboBox()
+        self.config_anchor_combo.addItems(ANCHOR_NAMES)
+        form.addRow("主播", self.config_anchor_combo)
+
+        self.config_top_right = QComboBox()
+        self.config_top_right.setIconSize(QSize(20, 20))
+        form.addRow("右上變色", self.config_top_right)
+
+        self.config_left_text = QLineEdit()
+        form.addRow("左邊字", self.config_left_text)
+        self.config_left_text_label = form.labelForField(self.config_left_text)
+
+        self.config_title1 = QLineEdit()
+        form.addRow("大標第一行", self.config_title1)
+
+        self.config_title2 = QLineEdit()
+        form.addRow("大標第二行", self.config_title2)
+
+        self.config_image_instruction = QLineEdit()
+        self.config_image_instruction.setReadOnly(True)
+        form.addRow("圖片指示", self.config_image_instruction)
+        self.config_image_instruction_label = form.labelForField(self.config_image_instruction)
+
+        self.config_image_preview = QLabel("尚無圖片")
+        self.config_image_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.config_image_preview.setMinimumHeight(120)
+        self.config_image_preview.setStyleSheet(
+            f"background-color: {DarkTheme.BG_PRIMARY}; color: {DarkTheme.TEXT_HINT}; "
+            f"border: 1px solid {DarkTheme.BORDER};"
+        )
+        form.addRow("實際圖片", self.config_image_preview)
+        self.config_image_preview_label = form.labelForField(self.config_image_preview)
+
+        self.config_color_words = QLineEdit()
+        self.config_color_words.setReadOnly(True)
+        form.addRow("引號變色字", self.config_color_words)
+
+        self.config_effect_words = QLineEdit()
+        self.config_effect_words.setReadOnly(True)
+        form.addRow("效果字", self.config_effect_words)
+
+        self.config_validation = QLineEdit()
+        self.config_validation.setReadOnly(True)
+        form.addRow("格式檢查", self.config_validation)
+
+        self.config_file_content = QTextEdit()
+        self.config_file_content.setReadOnly(True)
+        self.config_file_content.setMinimumHeight(180)
+        form.addRow("文字檔", self.config_file_content)
+
+        config_scroll.setWidget(self.config_form_widget)
+        outer.addWidget(config_scroll, 1)
+
+        note = QLabel("修改只套用本次程式工作階段，不會改寫原始文字檔。")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {DarkTheme.TEXT_HINT};")
+        outer.addWidget(note)
+
+        buttons = QHBoxLayout()
+        apply_btn = QPushButton("套用設定")
+        apply_btn.clicked.connect(self.apply_thumbnail_config)
+        reset_btn = QPushButton("還原設定")
+        reset_btn.clicked.connect(self.reset_thumbnail_config)
+        buttons.addWidget(apply_btn)
+        buttons.addWidget(reset_btn)
+        outer.addLayout(buttons)
+
+        self.config_form_widget.setEnabled(False)
+        apply_btn.setEnabled(False)
+        reset_btn.setEnabled(False)
+        self.config_apply_btn = apply_btn
+        self.config_reset_btn = reset_btn
+        return panel
+
+    def adjust_thumbnail_config_width(self):
+        """依目前可見設定的需要加寬右欄，避免外層出現橫向捲動條。"""
+        if not self.thumbnail_config_panel.isVisible():
+            return
+
+        self.config_form_layout.activate()
+        self.config_form_widget.adjustSize()
+
+        scroll_extra = self.config_scroll.frameWidth() * 2
+        if self.config_scroll.verticalScrollBar().isVisible():
+            scroll_extra += self.config_scroll.verticalScrollBar().sizeHint().width()
+
+        panel_margins = self.thumbnail_config_panel.layout().contentsMargins()
+        required_width = (
+            self.config_form_widget.sizeHint().width()
+            + scroll_extra
+            + panel_margins.left()
+            + panel_margins.right()
+        )
+        target_width = max(
+            self.config_default_width,
+            min(required_width, self.config_auto_max_width),
+        )
+        self.thumbnail_config_panel.setMinimumWidth(target_width)
+        self.thumbnail_config_panel.setMaximumWidth(target_width)
+
+    def reset_thumbnail_config_width(self):
+        """右欄隱藏時恢復原本的固定寬度。"""
+        self.thumbnail_config_panel.setMinimumWidth(220)
+        self.thumbnail_config_panel.setMaximumWidth(self.config_default_width)
+
+    def adjust_file_list_width(self):
+        """只有檔名超出預設寬度時才自動加寬左欄。"""
+        if self.file_list.count() == 0:
+            self.reset_file_list_width()
+            return
+
+        longest_item_width = self.file_list.sizeHintForColumn(0)
+        list_extra = (
+            self.file_list.frameWidth() * 2
+            + (
+                self.file_list.verticalScrollBar().sizeHint().width()
+                if self.file_list.verticalScrollBar().isVisible()
+                else 0
+            )
+            + 4
+        )
+        margins = self.left_frame.layout().contentsMargins()
+        required_width = longest_item_width + list_extra + margins.left() + margins.right()
+        if required_width <= self.file_list_default_width + 16:
+            target_width = self.file_list_default_width
+        else:
+            auto_max_width = max(self.file_list_auto_max_width, int(self.width() * 0.40))
+            target_width = min(required_width, auto_max_width)
+        self.left_frame.setMinimumWidth(target_width)
+        self.left_frame.setMaximumWidth(target_width)
+
+    def reset_file_list_width(self):
+        """載入新列表前恢復左欄預設固定寬度。"""
+        self.left_frame.setMinimumWidth(self.file_list_default_width)
+        self.left_frame.setMaximumWidth(self.file_list_default_width)
     
     def auto_load_default_folder(self):
         """自動載入預設網路路徑中的文件"""
@@ -833,12 +1266,7 @@ class MainWindow(QMainWindow):
         today = datetime.now().strftime("%m%d")
         
         # 構建預設路徑列表（優先順序）
-        base_path = r"\\10.227.58.117\新聞txt"
-        default_paths = [
-            os.path.join(base_path, today, "1800"),
-            os.path.join(base_path, today, "1819"),
-            os.path.join(base_path, today),
-        ]
+        default_paths = get_text_directory_candidates(today)
         
         # 尋找存在的路徑並載入
         folder_loaded = False
@@ -853,6 +1281,29 @@ class MainWindow(QMainWindow):
         
         if not folder_loaded:
             self.add_log(f"⚠️ 預設路徑不存在，請手動選擇文件夾")
+
+    def on_date_entered(self):
+        """日期欄按 Enter 後，切換至該日的晚報文字資料夾。"""
+        mmdd = self.date_input.text().strip()
+        if not is_valid_mmdd(mmdd):
+            QMessageBox.warning(self, "日期格式錯誤", "請輸入 MMDD，例如 0820")
+            return
+
+        for folder_path in get_text_directory_candidates(mmdd):
+            if os.path.isdir(folder_path):
+                self.load_files_from_folder(folder_path)
+                self.settings["last_folder"] = folder_path
+                self.save_settings()
+                self.add_log(f"📅 已切換至 {mmdd}: {folder_path}")
+                return
+
+        searched = "\n".join(get_text_directory_candidates(mmdd))
+        self.add_log(f"⚠️ 找不到 {mmdd} 的文字資料夾")
+        QMessageBox.warning(
+            self,
+            "找不到文字資料夾",
+            f"找不到 {mmdd} 的文字資料夾，已搜尋：\n{searched}",
+        )
 
     def on_refresh_files(self):
         """刷新當前文件夾的文件"""
@@ -872,6 +1323,297 @@ class MainWindow(QMainWindow):
         self.log_text.verticalScrollBar().setValue(
             self.log_text.verticalScrollBar().maximum()
         )
+
+    def set_config_row_visible(self, field, visible):
+        """同步顯示或隱藏右欄表單的一整列。"""
+        field.setVisible(visible)
+        label = self.config_form_layout.labelForField(field)
+        if label:
+            label.setVisible(visible)
+
+    def get_allowed_top_right_colors(self, color_id):
+        """依配色組別回傳可選的右上變色色碼。"""
+        exclude_map = {"O": "A", "P": "B", "B": "C", "G": "D"}
+        excluded_group = exclude_map.get((color_id or "")[:1].upper())
+        colors = []
+        for group, values in self.top_right_colors.items():
+            if group == excluded_group:
+                continue
+            for value in values:
+                color = str(value).strip().lstrip("#").lower()
+                if re.fullmatch(r"[0-9a-f]{6}", color) and color not in colors:
+                    colors.append(color)
+        return colors
+
+    def populate_top_right_combo(self, color_id, selected_color=""):
+        """以色塊圖示與色碼填入右上變色下拉選單。"""
+        if color_id not in self.color_schemes:
+            self.config_top_right.blockSignals(True)
+            self.config_top_right.clear()
+            self.config_top_right.addItem(UNRECORDED_CONFIG)
+            self.config_top_right.setEnabled(False)
+            self.config_top_right.blockSignals(False)
+            return ""
+
+        self.config_top_right.setEnabled(True)
+        colors = self.get_allowed_top_right_colors(color_id)
+        selected = str(selected_color or "").strip().lstrip("#").lower()
+        if selected and selected not in colors and re.fullmatch(r"[0-9a-f]{6}", selected):
+            colors.insert(0, selected)
+        if not selected and colors:
+            selected = random.choice(colors)
+
+        self.config_top_right.blockSignals(True)
+        self.config_top_right.clear()
+        for color in colors:
+            swatch = QPixmap(20, 20)
+            swatch.fill(QColor(f"#{color}"))
+            self.config_top_right.addItem(QIcon(swatch), color)
+        selected_index = self.config_top_right.findText(selected)
+        if selected_index >= 0:
+            self.config_top_right.setCurrentIndex(selected_index)
+        self.config_top_right.blockSignals(False)
+        return self.config_top_right.currentText()
+
+    def on_config_color_changed(self, color_id):
+        """切換配色時同步更新可用的右上變色清單。"""
+        if not hasattr(self, "config_top_right"):
+            return
+        current = self.config_top_right.currentText().strip().lower()
+        allowed = self.get_allowed_top_right_colors(color_id)
+        self.populate_top_right_combo(color_id, current if current in allowed else "")
+
+    def set_config_color_selection(self, color_id):
+        """顯示已記錄配色；沒有紀錄時明確顯示未記錄。"""
+        self.config_color_combo.blockSignals(True)
+        unknown_index = self.config_color_combo.findText(UNRECORDED_CONFIG)
+        if color_id in self.color_schemes:
+            if unknown_index >= 0:
+                self.config_color_combo.removeItem(unknown_index)
+            color_index = self.config_color_combo.findText(color_id)
+            self.config_color_combo.setCurrentIndex(color_index)
+        else:
+            if unknown_index < 0:
+                self.config_color_combo.insertItem(0, UNRECORDED_CONFIG)
+                unknown_index = 0
+            self.config_color_combo.setCurrentIndex(unknown_index)
+        self.config_color_combo.blockSignals(False)
+
+    def read_text_file_for_display(self, file_path):
+        """讀取右欄要顯示的原始文字檔內容。"""
+        for encoding in ("utf-8-sig", "cp950"):
+            try:
+                with open(file_path, "r", encoding=encoding) as infile:
+                    return infile.read()
+            except UnicodeDecodeError:
+                continue
+            except OSError:
+                return ""
+        return ""
+
+    def thumbnail_config_storage_key(self, filename, source_file_path=""):
+        """以來源文字檔完整路徑作為生成設定的穩定索引。"""
+        if source_file_path:
+            return os.path.normcase(os.path.normpath(os.path.abspath(source_file_path)))
+        folder = self.settings.get("last_folder", "")
+        if not folder or not filename:
+            return ""
+        return os.path.normcase(os.path.normpath(os.path.abspath(os.path.join(folder, filename))))
+
+    def load_persisted_thumbnail_config(self, filename):
+        """讀取與目前 JPG 相符的上次成功生成設定。"""
+        records = self.settings.get("thumbnail_generation_configs", {})
+        if not isinstance(records, dict):
+            return {}
+        record = records.get(self.thumbnail_config_storage_key(filename), {})
+        if not isinstance(record, dict):
+            return {}
+
+        thumbnail_info = getattr(self, "thumbnail_grid", None)
+        thumbnail_info = thumbnail_info.thumbnails.get(filename, {}) if thumbnail_info else {}
+        current_jpg = thumbnail_info.get("jpg_path")
+        saved_jpg = record.get("jpg_path")
+        if current_jpg and saved_jpg:
+            if os.path.normcase(os.path.normpath(current_jpg)) != os.path.normcase(os.path.normpath(saved_jpg)):
+                return {}
+            try:
+                saved_mtime = float(record.get("jpg_mtime", 0))
+                if saved_mtime and abs(os.path.getmtime(current_jpg) - saved_mtime) > 0.001:
+                    return {}
+            except (OSError, TypeError, ValueError):
+                return {}
+        return record
+
+    def persist_thumbnail_config(self, filename, report, jpg_path):
+        """保存成功生成時實際使用的配色，供重新啟動後讀回。"""
+        storage_key = self.thumbnail_config_storage_key(
+            filename, report.get("source_file_path", "")
+        )
+        color_id = str(report.get("color_id", "") or "").strip()
+        top_right = str(report.get("top_right_color", "") or "").strip().lstrip("#").lower()
+        if not storage_key or color_id not in self.color_schemes or not re.fullmatch(r"[0-9a-f]{6}", top_right):
+            return
+
+        records = self.settings.setdefault("thumbnail_generation_configs", {})
+        if not isinstance(records, dict):
+            records = {}
+            self.settings["thumbnail_generation_configs"] = records
+        try:
+            jpg_mtime = os.path.getmtime(jpg_path)
+        except OSError:
+            jpg_mtime = 0
+        records[storage_key] = {
+            "color_id": color_id,
+            "top_right_color": top_right,
+            "jpg_path": os.path.normpath(jpg_path),
+            "jpg_mtime": jpg_mtime,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self.save_settings()
+
+    def get_thumbnail_visual_config(self, filename, resolved):
+        """取得自訂或實際生成設定；單純查看縮圖時不再隨機選色。"""
+        visual = resolve_visual_config(
+            self.thumbnail_overrides.get(filename),
+            resolved,
+            self.load_persisted_thumbnail_config(filename),
+        )
+        return visual.get("color_id", ""), visual.get("top_right_color", "")
+
+    def update_config_image_preview(self, image_paths):
+        """在右欄顯示實際配對圖片的小圖。"""
+        paths = [str(path) for path in (image_paths or []) if path]
+        if not paths:
+            self.config_image_preview.clear()
+            self.config_image_preview.setText("尚未配對圖片")
+            self.config_image_preview.setToolTip("")
+            return
+
+        pixmap = QPixmap(paths[0])
+        if pixmap.isNull():
+            self.config_image_preview.clear()
+            self.config_image_preview.setText("圖片無法預覽")
+        else:
+            self.config_image_preview.setPixmap(
+                pixmap.scaled(
+                    260, 150,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        self.config_image_preview.setToolTip("\n".join(paths))
+
+    def on_thumbnail_selected(self, filename):
+        """載入被點擊縮圖的文字解析結果與生成設定。"""
+        folder = self.settings.get("last_folder", "")
+        file_path = os.path.join(folder, filename) if folder else ""
+        if not file_path or not os.path.isfile(file_path):
+            self.add_log(f"❌ 無法載入縮圖設定，找不到文字檔: {file_path or filename}")
+            return
+
+        parsed = prepare_file_data(file_path, self.date_input.text().strip())
+        if not parsed:
+            parsed = parse_file(file_path)
+        if not parsed:
+            self.add_log(f"❌ 無法解析縮圖設定: {filename}")
+            return
+
+        self.selected_thumbnail_filename = filename
+        self.thumbnail_config_panel.setVisible(True)
+        resolved = self.resolved_thumbnail_configs.get(filename, {})
+        display_result = dict(parsed)
+        if resolved.get("result"):
+            display_result.update(resolved["result"])
+        display_result.update(self.thumbnail_overrides.get(filename, {}))
+
+        self.config_selected_label.setText(filename)
+        self.config_layout_value.setText(display_result.get("layout_type", ""))
+        self.config_anchor_combo.setCurrentText(display_result.get("anchor", ""))
+        self.config_left_text.setText(display_result.get("left_text", ""))
+        self.config_title1.setText(display_result.get("title_line1", ""))
+        self.config_title2.setText(display_result.get("title_line2", ""))
+        self.config_image_instruction.setText(display_result.get("image_instruction", ""))
+        image_paths = display_result.get("image_paths", []) or []
+        if not image_paths and display_result.get("image_path"):
+            image_paths = [display_result["image_path"]]
+        self.update_config_image_preview(image_paths)
+        self.config_color_words.setText("、".join(display_result.get("color_words", []) or []))
+        self.config_effect_words.setText("、".join(display_result.get("effect_words", []) or []))
+        validation_errors = display_result.get("validation_errors", []) or []
+        image_warnings = display_result.get("image_warnings", []) or []
+        if validation_errors:
+            self.config_validation.setText("；".join(validation_errors))
+        elif image_warnings:
+            self.config_validation.setText("警告：" + "；".join(image_warnings))
+        else:
+            self.config_validation.setText("正常")
+        self.config_file_content.setPlainText(self.read_text_file_for_display(file_path))
+
+        color_id, top_right = self.get_thumbnail_visual_config(filename, resolved)
+        self.set_config_color_selection(color_id)
+        self.populate_top_right_combo(color_id, top_right)
+
+        has_left_text = bool(display_result.get("left_text", "").strip())
+        self.set_config_row_visible(self.config_left_text, has_left_text)
+        has_image = bool(image_paths)
+        self.set_config_row_visible(self.config_image_preview, has_image)
+        self.set_config_row_visible(
+            self.config_image_instruction,
+            bool(display_result.get("image_instruction", "").strip()),
+        )
+
+        self.config_form_widget.setEnabled(True)
+        self.config_apply_btn.setEnabled(True)
+        self.config_reset_btn.setEnabled(True)
+        QTimer.singleShot(0, self.adjust_thumbnail_config_width)
+
+    def apply_thumbnail_config(self):
+        """保存單張縮圖覆寫設定，並立即重新生成目前縮圖。"""
+        filename = self.selected_thumbnail_filename
+        if not filename:
+            return
+
+        title1 = self.config_title1.text().strip()
+        title2 = self.config_title2.text().strip()
+        if not title1 or not title2:
+            QMessageBox.warning(self, "設定不完整", "大標第一行與第二行都不能留空。")
+            return
+        if title1.count('"') % 2 or title2.count('"') % 2:
+            QMessageBox.warning(self, "引號未閉合", "大標中的半形雙引號必須成對出現。")
+            return
+
+        top_right = self.config_top_right.currentText().strip().lstrip("#")
+        color_text = self.config_color_combo.currentText().strip()
+        if color_text not in self.color_schemes:
+            QMessageBox.warning(self, "設定不完整", "請先選擇配色組別。")
+            return
+        if not re.fullmatch(r"[0-9a-fA-F]{6}", top_right):
+            QMessageBox.warning(self, "設定不完整", "請先選擇右上變色。")
+            return
+        self.thumbnail_overrides[filename] = {
+            "color_id": color_text,
+            "top_right_color": top_right.lower(),
+            "anchor": self.config_anchor_combo.currentText().strip(),
+            "left_text": self.config_left_text.text().strip(),
+            "title_line1": title1,
+            "title_line2": title2,
+        }
+        self.add_log(f"🎛 已套用縮圖設定: {filename}")
+        self.config_selected_label.setText(f"{filename}\n⏳ 已套用自訂設定，正在重新生成")
+        self.on_reprocess_requested(filename)
+
+    def reset_thumbnail_config(self):
+        """移除單張縮圖覆寫，還原文字檔與目前實際生成設定。"""
+        filename = self.selected_thumbnail_filename
+        if not filename:
+            return
+        self.thumbnail_overrides.pop(filename, None)
+        self.add_log(f"↩ 已還原設定: {filename}")
+        self.on_thumbnail_selected(filename)
+
+    def on_config_resolved(self, filename, report):
+        """暫存 JSX 實際使用的設定，待 JPG 成功生成後再確認。"""
+        self.pending_thumbnail_configs[filename] = dict(report or {})
     
     def on_browse_folder(self):
         """瀏覽文件夾"""
@@ -886,11 +1628,45 @@ class MainWindow(QMainWindow):
             self.settings["last_folder"] = folder
             self.save_settings()
             self.add_log(f"✓ 已載入文件夾: {folder}")
+
+    def on_file_double_clicked(self, item):
+        """雙擊文字檔列表項目時，以 Windows 預設程式開啟檔案。"""
+        filename = item.data(Qt.ItemDataRole.UserRole)
+        current_folder = self.settings.get("last_folder", "")
+        file_path = os.path.join(current_folder, filename) if current_folder and filename else ""
+
+        if not file_path or not os.path.isfile(file_path):
+            self.add_log(f"❌ 找不到文字檔: {file_path or filename}")
+            QMessageBox.warning(self, "找不到文字檔", f"無法開啟：\n{file_path or filename}")
+            return
+
+        try:
+            os.startfile(file_path)
+            self.add_log(f"📄 已開啟文字檔: {filename}")
+        except OSError as error:
+            self.add_log(f"❌ 無法開啟文字檔: {file_path}（{error}）")
+            QMessageBox.warning(self, "無法開啟文字檔", f"無法開啟：\n{file_path}\n\n{error}")
     
     def load_files_from_folder(self, folder_path):
         """從文件夾載入 .txt 檔案 (只顯示檔名含有「晚報YT縮圖」的，按數字排序)"""
+        normalized_folder = os.path.normcase(os.path.abspath(folder_path))
+        if self.config_folder != normalized_folder:
+            self.config_folder = normalized_folder
+            self.thumbnail_overrides.clear()
+            self.resolved_thumbnail_configs.clear()
+            self.pending_thumbnail_configs.clear()
+            self.selected_thumbnail_filename = None
+            if hasattr(self, "config_form_widget"):
+                self.thumbnail_config_panel.setVisible(False)
+                self.reset_thumbnail_config_width()
+                self.config_form_widget.setEnabled(False)
+                self.config_apply_btn.setEnabled(False)
+                self.config_reset_btn.setEnabled(False)
+                self.config_selected_label.setText("請點擊中間的縮圖")
+
         self.file_list.clear()
         self.file_list.item_checked = {}
+        self.reset_file_list_width()
         
         # 獲取所有 .txt 檔案
         all_txt_files = glob.glob(os.path.join(folder_path, "*.txt"))
@@ -904,11 +1680,13 @@ class MainWindow(QMainWindow):
         for file_path in filtered_files:
             filename = os.path.basename(file_path)
             self.file_list.add_file(filename)
+        QTimer.singleShot(0, self.adjust_file_list_width)
         
         # === 新增功能：載入文件時自動預覽已完成的縮圖 ===
         # 初始化預覽縮圖網格
         self.thumbnail_grid = ThumbnailGridWidget(parent_window=self)
         self.thumbnail_grid.reprocess_requested.connect(self.on_reprocess_requested)
+        self.thumbnail_grid.thumbnail_selected.connect(self.on_thumbnail_selected)
         
         # 1. 嘗試推斷輸出路徑
         # 嘗試從路徑中提取 MMDD，例如 .../0813/1800 或 .../08月/0813/1800。
@@ -1010,6 +1788,34 @@ class MainWindow(QMainWindow):
         total_found = len(all_txt_files)
         filtered_count = len(filtered_files)
         self.add_log(f"✓ 找到 {filtered_count} 個晚報YT縮圖檔案 (總共 {total_found} 個 .txt 文件)")
+
+    def update_generation_stats(self):
+        """依本次批次工作狀態更新待生成／完成／失敗數量。"""
+        self.stats_label.setText(
+            format_generation_stats(
+                len(self.batch_pending_files),
+                len(self.batch_completed_files),
+                len(self.batch_failed_files),
+            )
+        )
+
+    def start_generation_stats(self, filenames):
+        self.batch_generation_active = True
+        self.batch_pending_files = set(filenames)
+        self.batch_completed_files = set()
+        self.batch_failed_files = set()
+        self.update_generation_stats()
+
+    def finish_generation_file(self, filename, succeeded):
+        """單張批次工作完成時即時更新統計，重複信號不重複計數。"""
+        if not self.batch_generation_active or filename not in self.batch_pending_files:
+            return
+        self.batch_pending_files.discard(filename)
+        if succeeded:
+            self.batch_completed_files.add(filename)
+        else:
+            self.batch_failed_files.add(filename)
+        self.update_generation_stats()
     
     def on_start_clicked(self):
         """開始生成"""
@@ -1043,6 +1849,7 @@ class MainWindow(QMainWindow):
             if not hasattr(self, 'thumbnail_grid') or self.thumbnail_grid is None:
                 self.thumbnail_grid = ThumbnailGridWidget(parent_window=self)
                 self.thumbnail_grid.reprocess_requested.connect(self.on_reprocess_requested)
+                self.thumbnail_grid.thumbnail_selected.connect(self.on_thumbnail_selected)
                 self.scroll.setWidget(self.thumbnail_grid)
 
             # 重置選中檔案的狀態
@@ -1061,20 +1868,27 @@ class MainWindow(QMainWindow):
                 self.thumbnail_grid.thumbnails[filename]["reprocess_btn"].setEnabled(False)
             
             # 更新統計
-            self.stats_label.setText(f"待生成: {len(checked_files)} | 已完成: 0 | 失敗: 0")
+            self.start_generation_stats(checked_files)
             self.progress_bar.setValue(0)
             
             # 創建並啟動工作線程
             date = self.date_input.text().strip()
             if not is_valid_mmdd(date):
                 QMessageBox.warning(self, "警告", "日期格式錯誤，請輸入 MMDD，例如 0813")
+                self.batch_generation_active = False
+                self.batch_pending_files.clear()
+                self.batch_completed_files.clear()
+                self.batch_failed_files.clear()
+                self.update_generation_stats()
                 self.start_btn.setEnabled(True)
                 self.start_btn.setText("▶ 開始生成")
                 self.pause_btn.hide()
                 return
             last_folder = self.settings.get("last_folder", os.getcwd())
             
-            self.worker = GenerationWorker(checked_files, date, creator, last_folder)
+            self.worker = GenerationWorker(
+                checked_files, date, creator, last_folder, self.thumbnail_overrides
+            )
             self.worker.progress.connect(self.on_progress_update)
             self.worker.log.connect(self.on_worker_log)
             self.worker.completed.connect(self.on_generation_complete)
@@ -1082,6 +1896,7 @@ class MainWindow(QMainWindow):
             self.worker.warning.connect(self.on_worker_warning)
             self.worker.file_completed.connect(self.on_file_completed)
             self.worker.file_failed.connect(self.on_file_failed)
+            self.worker.config_resolved.connect(self.on_config_resolved)
             self.worker.start()
             
         except Exception as e:
@@ -1119,10 +1934,24 @@ class MainWindow(QMainWindow):
     
     def on_worker_error(self, error_msg):
         """工作線程錯誤"""
+        if self.batch_generation_active:
+            self.batch_failed_files.update(self.batch_pending_files)
+            self.batch_pending_files.clear()
+            self.batch_generation_active = False
+            self.update_generation_stats()
         self.add_log(f"❌ {error_msg}")
         self.start_btn.setEnabled(True)
         self.start_btn.setText("▶ 開始生成")
         self.pause_btn.hide()
+
+    def on_reprocess_error(self, error_msg):
+        """單張重新生成失敗時停止 loading，並保留原縮圖。"""
+        active_filename = self.active_reprocess_filename
+        if active_filename and active_filename in self.thumbnail_grid.thumbnails:
+            self.thumbnail_grid.stop_loading(active_filename)
+            self.thumbnail_grid.thumbnails[active_filename]["reprocess_btn"].setEnabled(True)
+        self.active_reprocess_filename = None
+        self.on_worker_error(error_msg)
 
     def on_worker_warning(self, warning_msg):
         """顯示可略過的單檔警告，批次工作繼續執行。"""
@@ -1131,6 +1960,8 @@ class MainWindow(QMainWindow):
     
     def on_generation_complete(self, success_count, failed_count, total_count):
         """生成完成"""
+        self.batch_generation_active = False
+        self.batch_pending_files.clear()
         self.start_btn.setEnabled(True)
         self.start_btn.setText("▶ 開始生成")
         self.pause_btn.hide()
@@ -1139,7 +1970,7 @@ class MainWindow(QMainWindow):
         self.progress_label.setText("已完成")
         
         # 更新統計
-        self.stats_label.setText(f"待生成: 0 | 已完成: {success_count} | 失敗: {failed_count}")
+        self.stats_label.setText(format_generation_stats(0, success_count, failed_count))
         
         # 顯示結果於日誌 (取代彈出視窗)
         if failed_count == 0:
@@ -1164,14 +1995,33 @@ class MainWindow(QMainWindow):
     
     def on_file_completed(self, filename, jpg_path):
         """檔案生成完成，更新縮圖"""
+        self.finish_generation_file(filename, True)
         self.thumbnail_grid.update_thumbnail(filename, jpg_path)
+        report = self.pending_thumbnail_configs.pop(filename, None)
+        if report:
+            self.resolved_thumbnail_configs[filename] = report
+            override = self.thumbnail_overrides.get(filename)
+            if override is not None:
+                override["color_id"] = report.get("color_id", override.get("color_id", ""))
+                override["top_right_color"] = report.get(
+                    "top_right_color", override.get("top_right_color", "")
+                )
+            self.persist_thumbnail_config(filename, report, jpg_path)
+            if self.selected_thumbnail_filename == filename:
+                self.on_thumbnail_selected(filename)
     
     def on_file_failed(self, filename):
         """檔案生成失敗，標記為失敗狀態"""
+        self.finish_generation_file(filename, False)
         self.thumbnail_grid.mark_failed(filename)
     
     def on_reprocess_complete(self, success_count, failed_count, total_count):
         """重新處理完成"""
+        active_filename = self.active_reprocess_filename
+        if active_filename and active_filename in self.thumbnail_grid.thumbnails:
+            self.thumbnail_grid.stop_loading(active_filename)
+            self.thumbnail_grid.thumbnails[active_filename]["reprocess_btn"].setEnabled(True)
+        self.active_reprocess_filename = None
         # 顯示結果於日誌
         if failed_count == 0:
             msg = f"✓ 縮圖重新生成成功！"
@@ -1230,11 +2080,9 @@ class MainWindow(QMainWindow):
             
             # 重置該檔案的縮圖狀態
             if target_key:
-                self.thumbnail_grid.thumbnails[target_key]["status_label"].setText("⏳ 重新生成中...")
-                self.thumbnail_grid.thumbnails[target_key]["status"] = "processing"
-                self.thumbnail_grid.thumbnails[target_key]["jpg_path"] = None
-                self.thumbnail_grid.thumbnails[target_key]["psd_path"] = None
+                self.thumbnail_grid.show_reprocess_loading(target_key)
                 self.thumbnail_grid.thumbnails[target_key]["reprocess_btn"].setEnabled(False)
+                self.active_reprocess_filename = target_key
             
             self.add_log(f"↻ 重新生成: {filename}")
             
@@ -1245,12 +2093,15 @@ class MainWindow(QMainWindow):
                 return
             creator = self.creator_input.text().strip()
             
-            self.reprocess_worker = GenerationWorker([filename], date, creator, last_folder)
+            self.reprocess_worker = GenerationWorker(
+                [filename], date, creator, last_folder, self.thumbnail_overrides
+            )
             self.reprocess_worker.progress.connect(self.on_progress_update)
             self.reprocess_worker.log.connect(self.on_worker_log)
             self.reprocess_worker.file_completed.connect(self.on_file_completed)
             self.reprocess_worker.file_failed.connect(self.on_file_failed)
-            self.reprocess_worker.error.connect(self.on_worker_error)
+            self.reprocess_worker.config_resolved.connect(self.on_config_resolved)
+            self.reprocess_worker.error.connect(self.on_reprocess_error)
             self.reprocess_worker.warning.connect(self.on_worker_warning)
             # 連接完成信號
             self.reprocess_worker.completed.connect(self.on_reprocess_complete)
@@ -1260,6 +2111,9 @@ class MainWindow(QMainWindow):
         except Exception as e:
             import traceback
             traceback.print_exc()
+            if self.active_reprocess_filename:
+                self.thumbnail_grid.stop_loading(self.active_reprocess_filename)
+                self.active_reprocess_filename = None
             self.add_log(f"❌ 重新處理出錯: {str(e)}")
 
     

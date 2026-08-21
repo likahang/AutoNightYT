@@ -28,13 +28,15 @@ class GenerationWorker(QThread):
     warning = pyqtSignal(str)  # 可略過的單檔警告
     file_completed = pyqtSignal(str, str)  # (filename, jpg_path) - 檔案完成並生成 JPG
     file_failed = pyqtSignal(str)  # (filename) - 檔案生成失敗
+    config_resolved = pyqtSignal(str, dict)  # (filename, 實際生成設定)
     
-    def __init__(self, checked_files, date, creator, folder_path):
+    def __init__(self, checked_files, date, creator, folder_path, file_configs=None):
         super().__init__()
         self.checked_files = checked_files
         self.date = date
         self.creator = creator
         self.folder_path = folder_path
+        self.file_configs = dict(file_configs or {})
         self.is_running = True
         self.is_paused = False
     
@@ -106,6 +108,17 @@ class GenerationWorker(QThread):
                         failed_count += 1
                         self.file_failed.emit(filename)
                         continue
+                    image_warnings = parsed.get("image_warnings", [])
+                    if image_warnings:
+                        warning_details = "\n".join(f"• {item}" for item in image_warnings)
+                        warning_message = (
+                            f"{filename}\n{warning_details}\n\n"
+                            "缺少的圖片已略過，其餘圖片會繼續生成。"
+                        )
+                        self.log.emit(
+                            f"⚠️ {filename}：{'；'.join(image_warnings)}（其餘圖片繼續）"
+                        )
+                        self.warning.emit(warning_message)
                     if parsed.get("validation_errors"):
                         details = "\n".join(f"• {item}" for item in parsed["validation_errors"])
                         warning_message = f"{filename}\n{details}\n\n已略過該檔。"
@@ -178,6 +191,7 @@ class GenerationWorker(QThread):
                     success_count += 1
                 else:
                     self.log.emit(f"❌ [{idx}/{len(jsx_map)}] 失敗: {filename}")
+                    self.file_failed.emit(filename)
             
             # 發送完成信號
             final_failed = total_count - success_count
@@ -253,11 +267,17 @@ class GenerationWorker(QThread):
             labeled_psd_file = base_path / "晚報YT縮圖(標圖版).psd"
             
             self.log.emit(f"⚙️ 執行生成邏輯: {os.path.basename(file_path)}")
+
+            filename = os.path.basename(file_path)
+            file_config = dict(self.file_configs.get(filename, {}))
+            color_id = file_config.get("color_id") or None
+            top_right_color = file_config.get("top_right_color") or None
+            generation_report = {}
             
             # 調用 Python 函數直接執行，不需要 subprocess
             result_code = run_generation_logic(
                 str(file_path),
-                None, # color_id (隨機)
+                color_id,
                 str(psd_file),
                 str(csv_file),
                 str(jsx_output_dir),
@@ -265,7 +285,14 @@ class GenerationWorker(QThread):
                 self.creator,
                 self.date,
                 str(labeled_psd_file),
+                result_overrides=file_config,
+                top_right_color_override=top_right_color,
+                generation_report=generation_report,
             )
+
+            if generation_report:
+                generation_report["source_file_path"] = os.path.abspath(file_path)
+                self.config_resolved.emit(filename, generation_report)
             
             if result_code != 0:
                 self.log.emit(f"⚠️ JSX 生成返回錯誤代碼: {result_code}")
