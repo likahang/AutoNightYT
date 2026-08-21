@@ -63,6 +63,25 @@ def resolve_visual_config(override=None, resolved=None, persisted=None):
                 break
     return visual
 
+
+def get_scheme_explosion_color(color_scheme):
+    """取得配色組合第一行的爆炸色色碼，供設定欄顯示色塊。"""
+    color = str((color_scheme or {}).get("line1", {}).get("explosion", "") or "")
+    color = color.strip().lstrip("#").lower()
+    return color if re.fullmatch(r"[0-9a-f]{6}", color) else ""
+
+
+def get_display_effect_words(effect_words):
+    """排除只供主播定位使用、無須顯示在設定欄的控制指示。"""
+    display_words = []
+    for effect_word in effect_words or []:
+        normalized = re.sub(r"\s+", " ", str(effect_word or "").strip())
+        if re.fullmatch(r"定 \S+ 不要笑", normalized):
+            continue
+        if normalized:
+            display_words.append(normalized)
+    return display_words
+
 # ===== 配色方案 =====
 class DarkTheme:
     # 主色調
@@ -1120,7 +1139,15 @@ class MainWindow(QMainWindow):
         form.addRow("版型", self.config_layout_value)
 
         self.config_color_combo = QComboBox()
-        self.config_color_combo.addItems(sorted(self.color_schemes.keys()))
+        self.config_color_combo.setIconSize(QSize(20, 20))
+        for color_id in sorted(self.color_schemes.keys()):
+            explosion_color = get_scheme_explosion_color(self.color_schemes[color_id])
+            if explosion_color:
+                swatch = QPixmap(20, 20)
+                swatch.fill(QColor(f"#{explosion_color}"))
+                self.config_color_combo.addItem(QIcon(swatch), color_id)
+            else:
+                self.config_color_combo.addItem(color_id)
         self.config_color_combo.currentTextChanged.connect(self.on_config_color_changed)
         form.addRow("配色", self.config_color_combo)
 
@@ -1538,7 +1565,9 @@ class MainWindow(QMainWindow):
             image_paths = [display_result["image_path"]]
         self.update_config_image_preview(image_paths)
         self.config_color_words.setText("、".join(display_result.get("color_words", []) or []))
-        self.config_effect_words.setText("、".join(display_result.get("effect_words", []) or []))
+        self.config_effect_words.setText(
+            "、".join(get_display_effect_words(display_result.get("effect_words", [])))
+        )
         validation_errors = display_result.get("validation_errors", []) or []
         image_warnings = display_result.get("image_warnings", []) or []
         if validation_errors:

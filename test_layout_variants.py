@@ -9,7 +9,12 @@ from generate_photoshop_script import (
     generate_jsx_script,
     validate_color_scheme_csv_text,
 )
-from gui_main import format_generation_stats, resolve_visual_config
+from gui_main import (
+    format_generation_stats,
+    get_display_effect_words,
+    get_scheme_explosion_color,
+    resolve_visual_config,
+)
 from parse_thumbnail_txt import (
     LAYOUT_BIG_TITLE,
     LAYOUT_IMAGE_TITLE,
@@ -48,6 +53,16 @@ class LayoutParsingTests(unittest.TestCase):
         self.assertEqual(
             "待生成: 3 ｜ 已完成: 2 ｜ 失敗: 1",
             format_generation_stats(3, 2, 1),
+        )
+
+    def test_color_scheme_swatch_uses_explosion_color(self):
+        self.assertEqual("133aa8", get_scheme_explosion_color(color_scheme()))
+        self.assertEqual("", get_scheme_explosion_color({"line1": {"explosion": "錯誤"}}))
+
+    def test_anchor_position_instruction_is_hidden_from_effect_display(self):
+        self.assertEqual(
+            ["超大字"],
+            get_display_effect_words(["定 主播 不要笑", "定  鄭亦真  不要笑", "超大字"]),
         )
 
     def test_thumbnail_visual_config_does_not_invent_unrecorded_colors(self):
