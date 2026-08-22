@@ -18,6 +18,7 @@ from gui_main import (
 from parse_thumbnail_txt import (
     LAYOUT_BIG_TITLE,
     LAYOUT_IMAGE_TITLE,
+    apply_text_result_overrides,
     get_text_directory_candidates,
     infer_mmdd_from_path,
     parse_file,
@@ -118,9 +119,83 @@ class LayoutParsingTests(unittest.TestCase):
         result = parse_file(TEST_DIR_2 / "1800 晚報YT縮圖 9 美艦噩耗.txt")
         self.assertEqual(LAYOUT_IMAGE_TITLE, result["layout_type"])
         self.assertEqual("挑釁中國", result["left_text"])
-        self.assertEqual("定格 美驅逐艦+澳洲偵察機", result["image_instruction"])
+        self.assertEqual("美驅逐艦+澳洲偵察機", result["image_instruction"])
         self.assertNotIn("左邊字:挑釁中國", result["effect_words"])
         self.assertNotIn("定格 美驅逐艦+澳洲偵察機", result["effect_words"])
+
+    def test_image_notes_and_accidental_at_sign_are_ignored(self):
+        examples = (
+            ("(雅萬高鐵圖)(隔天上)", "雅萬高鐵圖"),
+            ("(黃岩島圖)@", "黃岩島圖"),
+        )
+        for index, (image_line, expected) in enumerate(examples):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "image_note.txt"
+                path.write_text(
+                    "1800 晚報YT縮圖 1 測試\n林嘉源\n"
+                    f"{image_line}\n震撼(左邊字)\n第一行\n第二行\n",
+                    encoding="utf-8",
+                )
+                result = parse_file(path)
+            self.assertEqual(expected, result["image_instruction"])
+            self.assertNotIn("隔天上", result["effect_words"])
+            self.assertEqual([], result["validation_errors"])
+
+    def test_ding_and_dingge_are_removed_from_image_instruction(self):
+        examples = (
+            ("(定 普丁登島 圖)", "普丁登島 圖"),
+            ("(定格 美驅逐艦)", "美驅逐艦"),
+        )
+        for index, (image_line, expected) in enumerate(examples):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "ding_image.txt"
+                path.write_text(
+                    "1800 晚報YT縮圖 1 測試\n何橞瑢\n"
+                    f"日本氣瘋(左邊字)\n{image_line}\n第一行\n第二行\n",
+                    encoding="utf-8",
+                )
+                result = parse_file(path)
+            self.assertEqual(expected, result["image_instruction"])
+            self.assertEqual([], result["validation_errors"])
+
+    def test_multiple_parenthesized_images_keep_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "multiple_parenthesized_images.txt"
+            path.write_text(
+                "1800 晚報YT縮圖 1 測試\n鄭亦真\n"
+                "(定格 國際法庭院長赤根智子)+(高市早苗人頭)\n"
+                "反擊逮捕令(左邊字)\n第一行\n第二行\n",
+                encoding="utf-8",
+            )
+            result = parse_file(path)
+        self.assertEqual("國際法庭院長赤根智子+高市早苗人頭", result["image_instruction"])
+        self.assertEqual([], result["validation_errors"])
+
+    def test_left_marker_before_text_uses_following_text_and_image(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "marker_before_text.txt"
+            path.write_text(
+                "1800 晚報YT縮圖 1 測試\n何橞瑢\n(左邊直字)\n"
+                "普丁開殺戒\n(定圖P1)\n第一行\n第二行\n",
+                encoding="utf-8",
+            )
+            result = parse_file(path)
+        self.assertEqual("普丁開殺戒", result["left_text"])
+        self.assertEqual("P1", result["image_instruction"])
+        self.assertEqual([], result["validation_errors"])
+
+    def test_missing_image_line_still_warns_and_skips(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "missing_image.txt"
+            path.write_text(
+                "1800 晚報YT縮圖 1 測試\n林嘉源\n震撼北京(左邊字)\n"
+                "第一行有引號\"完整\"\n第二行也完整\n",
+                encoding="utf-8",
+            )
+            result = parse_file(path)
+        self.assertEqual("", result["image_instruction"])
+        self.assertFalse(result["is_valid"])
+        self.assertTrue(any("圖片指示" in message for message in result["validation_errors"]))
 
     def test_left_vertical_marker_alias(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -199,22 +274,134 @@ class LayoutParsingTests(unittest.TestCase):
         self.assertEqual("", result["left_text"])
         self.assertEqual("", result["image_instruction"])
 
-    def test_left_marker_without_parenthesized_previous_line_is_invalid(self):
+    def test_image_instruction_without_parentheses_is_supported(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "bad.txt"
+            path = Path(temp_dir) / "unwrapped_image.txt"
             path.write_text(
                 "1800 晚報YT縮圖 1 測試\n林嘉源\n不是括號圖片\n測試(左邊字)\n第一行\n第二行\n",
                 encoding="utf-8",
             )
             result = parse_file(path)
         self.assertEqual(LAYOUT_IMAGE_TITLE, result["layout_type"])
-        self.assertFalse(result["is_valid"])
+        self.assertEqual("不是括號圖片", result["image_instruction"])
+        self.assertTrue(result["is_valid"])
+
+    def test_fullwidth_and_mixed_parentheses_are_normalized(self):
+        examples = (
+            "（測試圖片）\n震撼（左邊字）",
+            "（測試圖片)\n震撼(左邊字）",
+        )
+        for index, body in enumerate(examples):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "mixed_brackets.txt"
+                path.write_text(
+                    f"1800 晚報YT縮圖 1 測試\n林嘉源\n{body}\n第一行\n第二行\n",
+                    encoding="utf-8",
+                )
+                result = parse_file(path)
+            self.assertEqual(LAYOUT_IMAGE_TITLE, result["layout_type"])
+            self.assertEqual("震撼", result["left_text"])
+            self.assertEqual("測試圖片", result["image_instruction"])
+            self.assertEqual([], result["validation_errors"])
+
+    def test_left_marker_without_parentheses_is_supported(self):
+        examples = (
+            "震撼 左邊字",
+            "左邊字：震撼",
+            "左邊字震撼",
+        )
+        for index, marker_line in enumerate(examples):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "unwrapped_marker.txt"
+                path.write_text(
+                    "1800 晚報YT縮圖 1 測試\n林嘉源\n(測試圖片)\n"
+                    f"{marker_line}\n第一行\n第二行\n",
+                    encoding="utf-8",
+                )
+                result = parse_file(path)
+            self.assertEqual(LAYOUT_IMAGE_TITLE, result["layout_type"])
+            self.assertEqual("震撼", result["left_text"])
+            self.assertEqual("測試圖片", result["image_instruction"])
+            self.assertEqual([], result["validation_errors"])
+
+    def test_left_text_and_marker_on_separate_lines_are_supported(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "separate_marker.txt"
+            path.write_text(
+                "1800 晚報YT縮圖 1 測試\n林嘉源\n測試圖片\n震撼\n(左邊字)\n"
+                "第一行\n第二行\n",
+                encoding="utf-8",
+            )
+            result = parse_file(path)
+        self.assertEqual(LAYOUT_IMAGE_TITLE, result["layout_type"])
+        self.assertEqual("震撼", result["left_text"])
+        self.assertEqual("測試圖片", result["image_instruction"])
+        self.assertEqual([], result["validation_errors"])
+
+    def test_control_instruction_without_parentheses_is_not_image(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "control_not_image.txt"
+            path.write_text(
+                "1800 晚報YT縮圖 1 測試\n林嘉源\n超大字\n測試(左邊字)\n第一行\n第二行\n",
+                encoding="utf-8",
+            )
+            result = parse_file(path)
+        self.assertEqual("", result["image_instruction"])
         self.assertTrue(any("圖片指示" in message for message in result["validation_errors"]))
+
+    def test_embedded_left_marker_can_carry_image_on_same_line(self):
+        examples = (
+            "(左邊字：震撼)+(左圖+右圖)",
+            "左邊字：震撼 +(左圖+右圖)",
+            "震撼 左邊字+(左圖+右圖)",
+        )
+        for index, marker_line in enumerate(examples):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "same_line_image.txt"
+                path.write_text(
+                    "1800 晚報YT縮圖 1 測試\n林嘉源\n"
+                    f"{marker_line}\n第一行\n第二行\n",
+                    encoding="utf-8",
+                )
+                result = parse_file(path)
+            self.assertEqual("震撼", result["left_text"])
+            self.assertEqual("左圖+右圖", result["image_instruction"])
+            self.assertEqual([], result["validation_errors"])
 
     def test_unclosed_title_quote_is_invalid(self):
         result = parse_file(TEST_DIR / "1800 晚報YT縮圖 9 日開炸 嗆摧毀靖國神社.txt")
         self.assertFalse(result["is_valid"])
         self.assertTrue(any("未閉合的引號" in message for message in result["validation_errors"]))
+
+    def test_session_title_override_clears_quote_error_without_editing_source(self):
+        source = (
+            "1800 晚報YT縮圖 1 測試\n林嘉源\n(大底黑色)\n"
+            "炸掉\"靖國神社\n第二行大標\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "quote_override.txt"
+            path.write_text(source, encoding="utf-8")
+            result = prepare_file_data(
+                path,
+                "0813",
+                result_overrides={"title_line1": '炸掉"靖國神社"'},
+            )
+            unchanged_source = path.read_text(encoding="utf-8")
+
+        self.assertTrue(result["is_valid"])
+        self.assertEqual('炸掉"靖國神社"', result["title_line1"])
+        self.assertFalse(any("未閉合的引號" in item for item in result["validation_errors"]))
+        self.assertEqual(source, unchanged_source)
+
+    def test_invalid_session_override_keeps_quote_error(self):
+        result = {
+            "title_line1": '炸掉"靖國神社',
+            "title_line2": "第二行",
+            "validation_errors": ["第一行大標發現未閉合的引號"],
+        }
+        apply_text_result_overrides(result, {"title_line1": '仍然"錯誤'})
+        self.assertFalse(result["is_valid"])
+        self.assertTrue(any("未閉合的引號" in item for item in result["validation_errors"]))
 
     def test_month_archive_image_matching_prefers_issue_number(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -315,6 +502,9 @@ class LayoutJsxTests(unittest.TestCase):
         self.assertNotIn("250 / numberBounds0.width", script)
         self.assertIn("titleLayer2.resize(1340", script)
         self.assertIn("setLastCharBaselineShift(titleLayer1, -17.88)", script)
+        self.assertIn("titleLayer1, 200, null", script)
+        self.assertIn("titleLayer2, 200, null", script)
+        self.assertNotIn("titleLayer1, 200, 80", script)
         self.assertIn("userMaskFeather", script)
         self.assertIn("18.福建艦", script)
 
@@ -420,7 +610,11 @@ class LayoutJsxTests(unittest.TestCase):
         self.assertIn("titleLayer1.resize(1500", script)
         self.assertIn("titleLayer2.resize(1560", script)
         self.assertIn("setLastCharBaselineShift(titleLayer1, -30)", script)
-        self.assertIn("setCornerBracketStyleAt(textLayer, characterIndex, 400, 80)", script)
+        self.assertIn("titleLayer1, 350, 80", script)
+        self.assertIn("titleLayer2, 350, 80", script)
+        self.assertIn(
+            "setCornerBracketStyleAt(textLayer, characterIndex, 400, openingBaselineShift)", script
+        )
         self.assertIn("setCornerBracketStyleAt(textLayer, characterIndex, 400, null)", script)
         self.assertIn('charIDToTypeID("From")', script)
         self.assertIn('charIDToTypeID("T   ")', script)
@@ -455,8 +649,8 @@ class LayoutJsxTests(unittest.TestCase):
         self.assertNotIn("getTitleTextHorizontalScale", script)
         self.assertNotIn("var minimumKerningPosition = -1", script)
         self.assertNotIn("setTitleInsertionKerning", script)
-        self.assertIn("formatCornerBrackets(titleLayer1, 350)", script)
-        self.assertIn("formatCornerBrackets(titleLayer2, 350)", script)
+        self.assertIn("titleLayer1, 350, 80", script)
+        self.assertIn("titleLayer2, 350, 80", script)
 
     def test_percent_sign_in_title_uses_seventy_percent_character_size(self):
         result = parse_file(TEST_DIR / "1800 晚報YT縮圖 19 通報全球 日失敗了.txt")
@@ -468,7 +662,7 @@ class LayoutJsxTests(unittest.TestCase):
         self.assertIn("setTitlePercentSignsSize(textLayer, content, percentFontSize)", script)
         self.assertIn("cloneCornerBracketStyle(sourceStyle, fixedFontSize, null)", script)
         self.assertIn("if (percentCount === 0) return", script)
-        self.assertIn("formatCornerBrackets(titleLayer1, 350)", script)
+        self.assertIn("titleLayer1, 350, 80", script)
 
         labeled_result = dict(self.label_result)
         labeled_result["title_line1"] = "支持70%"
@@ -479,8 +673,8 @@ class LayoutJsxTests(unittest.TestCase):
             "output",
             source_date="0813",
         )
-        self.assertIn("formatCornerBrackets(titleLayer1, 200)", labeled_script)
-        self.assertIn("formatCornerBrackets(titleLayer2, 200)", labeled_script)
+        self.assertIn("titleLayer1, 200, null", labeled_script)
+        self.assertIn("titleLayer2, 200, null", labeled_script)
         self.assertNotIn("getTitleGlyphVisibleHeight", labeled_script)
 
 

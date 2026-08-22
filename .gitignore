@@ -25,3 +25,13 @@ modify_thumbnail_*.jsx
 /build/
 build_log*.txt
 *.spec
+
+# Needle 2 POC models and generated evaluation data
+/checkpoints/
+/needle_poc_output/
+*.cact
+/qwen_poc_output/
+/qwen17_poc_output/
+
+# Deterministic format-variation audit artifacts
+/format_audit_output/

@@ -5,17 +5,19 @@ echo 請確保已安裝 pyinstaller (pip install pyinstaller)
 
 pyinstaller ^
  --noconfirm ^
+ --clean ^
  --onefile ^
  --windowed ^
  --name "晚報YT縮圖生成器" ^
+ --icon "icon.ico" ^
+ --add-data "icon.png;." ^
  --add-data "晚報YT縮圖.psd;." ^
+ --add-data "晚報YT縮圖(標圖版).psd;." ^
  --add-data "晚報變色.csv;." ^
  --add-data "右上變色.csv;." ^
  --add-data "效果字處理.csv;." ^
  --add-data "參考.jsx;." ^
  --noupx ^
- --hidden-import "pandas" ^
- --hidden-import "psd_tools" ^
  gui_main.py
 
 echo.

@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
     QTextEdit, QSplitter, QCheckBox, QSpinBox, QComboBox,
     QScrollArea, QFrame, QProgressBar, QMenuBar, QMenu, QMessageBox,
-    QFileDialog, QGridLayout, QFormLayout
+    QFileDialog, QGridLayout, QFormLayout, QDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QElapsedTimer, QRectF, QByteArray
 from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QCursor, QPainter
@@ -31,8 +31,10 @@ import subprocess
 import glob
 from parse_thumbnail_txt import (
     ANCHOR_NAMES,
+    apply_text_result_overrides,
     get_text_directory_candidates,
     infer_mmdd_from_path,
+    is_unclosed_quote_error,
     is_valid_mmdd,
     parse_file,
     prepare_file_data,
@@ -873,10 +875,115 @@ class ThumbnailGridWidget(QWidget):
             pass
 
 
+class QuoteRepairDialog(QDialog):
+    """批次生成前修正未閉合引號；結果只回傳本次工作階段。"""
+
+    def __init__(self, items, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("修正未閉合引號")
+        self.resize(780, min(780, 260 + len(items) * 190))
+        self.rows = {}
+
+        root_layout = QVBoxLayout(self)
+        description = QLabel(
+            "以下大標的半形雙引號沒有成對。請直接修正文字，或勾選略過此檔。\n"
+            "修正只套用於本次生成，不會改動原始文字檔。"
+        )
+        description.setWordWrap(True)
+        root_layout.addWidget(description)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+
+        for item in items:
+            filename = item["filename"]
+            frame = QFrame()
+            frame.setFrameShape(QFrame.Shape.StyledPanel)
+            frame_layout = QVBoxLayout(frame)
+
+            filename_label = QLabel(filename)
+            filename_label.setStyleSheet("font-weight: bold;")
+            filename_label.setWordWrap(True)
+            frame_layout.addWidget(filename_label)
+
+            error_label = QLabel("；".join(item.get("errors", [])))
+            error_label.setWordWrap(True)
+            error_label.setStyleSheet(f"color: {DarkTheme.ACCENT_ORANGE};")
+            frame_layout.addWidget(error_label)
+
+            form = QFormLayout()
+            title1_input = QLineEdit(item.get("title_line1", ""))
+            title2_input = QLineEdit(item.get("title_line2", ""))
+            form.addRow("大標第一行", title1_input)
+            form.addRow("大標第二行", title2_input)
+            frame_layout.addLayout(form)
+
+            skip_checkbox = QCheckBox("略過此檔")
+            skip_checkbox.toggled.connect(title1_input.setDisabled)
+            skip_checkbox.toggled.connect(title2_input.setDisabled)
+            frame_layout.addWidget(skip_checkbox)
+            content_layout.addWidget(frame)
+
+            self.rows[filename] = {
+                "title_line1": title1_input,
+                "title_line2": title2_input,
+                "skip": skip_checkbox,
+            }
+
+        content_layout.addStretch()
+        scroll.setWidget(content)
+        root_layout.addWidget(scroll, 1)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        cancel_button = QPushButton("取消生成")
+        apply_button = QPushButton("套用並繼續")
+        cancel_button.clicked.connect(self.reject)
+        apply_button.clicked.connect(self.validate_and_accept)
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(apply_button)
+        root_layout.addLayout(button_layout)
+
+    def validate_and_accept(self):
+        invalid_files = []
+        for filename, row in self.rows.items():
+            if row["skip"].isChecked():
+                continue
+            title1 = row["title_line1"].text().strip()
+            title2 = row["title_line2"].text().strip()
+            if title1.count('"') % 2 or title2.count('"') % 2:
+                invalid_files.append(filename)
+
+        if invalid_files:
+            QMessageBox.warning(
+                self,
+                "引號仍未閉合",
+                "以下檔案的半形雙引號仍不是成對：\n\n"
+                + "\n".join(invalid_files),
+            )
+            return
+        self.accept()
+
+    def get_decisions(self):
+        overrides = {}
+        skipped = []
+        for filename, row in self.rows.items():
+            if row["skip"].isChecked():
+                skipped.append(filename)
+                continue
+            overrides[filename] = {
+                "title_line1": row["title_line1"].text().strip(),
+                "title_line2": row["title_line2"].text().strip(),
+            }
+        return overrides, skipped
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("晚報YT縮圖 - 自動生成系統")
+        self.setWindowTitle("晚報YT縮圖 - 測試版")
         self.setGeometry(100, 100, 1400, 900)
         self.setStyleSheet(STYLESHEET)
         
@@ -1538,7 +1645,11 @@ class MainWindow(QMainWindow):
             self.add_log(f"❌ 無法載入縮圖設定，找不到文字檔: {file_path or filename}")
             return
 
-        parsed = prepare_file_data(file_path, self.date_input.text().strip())
+        parsed = prepare_file_data(
+            file_path,
+            self.date_input.text().strip(),
+            result_overrides=self.thumbnail_overrides.get(filename),
+        )
         if not parsed:
             parsed = parse_file(file_path)
         if not parsed:
@@ -1845,6 +1956,50 @@ class MainWindow(QMainWindow):
         else:
             self.batch_failed_files.add(filename)
         self.update_generation_stats()
+
+    def review_unclosed_title_quotes(self, filenames, folder_path):
+        """生成前集中修正未閉合引號，回傳本次實際處理的檔案。"""
+        items = []
+        for filename in filenames:
+            file_path = os.path.join(folder_path, filename)
+            if not os.path.isfile(file_path):
+                continue
+            parsed = parse_file(file_path)
+            if not parsed:
+                continue
+            apply_text_result_overrides(parsed, self.thumbnail_overrides.get(filename))
+            quote_errors = [
+                error
+                for error in parsed.get("validation_errors", [])
+                if is_unclosed_quote_error(error)
+            ]
+            if not quote_errors:
+                continue
+            items.append(
+                {
+                    "filename": filename,
+                    "title_line1": parsed.get("title_line1", ""),
+                    "title_line2": parsed.get("title_line2", ""),
+                    "errors": quote_errors,
+                }
+            )
+
+        if not items:
+            return list(filenames)
+
+        dialog = QuoteRepairDialog(items, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        overrides, skipped = dialog.get_decisions()
+        for filename, text_override in overrides.items():
+            self.thumbnail_overrides.setdefault(filename, {}).update(text_override)
+            self.add_log(f"✎ 已套用本次引號修正: {filename}")
+        for filename in skipped:
+            self.add_log(f"⏭ 已依使用者選擇略過引號異常檔案: {filename}")
+
+        skipped_set = set(skipped)
+        return [filename for filename in filenames if filename not in skipped_set]
     
     def on_start_clicked(self):
         """開始生成"""
@@ -1857,6 +2012,21 @@ class MainWindow(QMainWindow):
             checked_files = self.file_list.get_checked_files()
             if not checked_files:
                 QMessageBox.warning(self, "警告", "請選擇至少一個文件")
+                return
+
+            date = self.date_input.text().strip()
+            if not is_valid_mmdd(date):
+                QMessageBox.warning(self, "警告", "日期格式錯誤，請輸入 MMDD，例如 0813")
+                return
+            last_folder = self.settings.get("last_folder", os.getcwd())
+
+            reviewed_files = self.review_unclosed_title_quotes(checked_files, last_folder)
+            if reviewed_files is None:
+                self.add_log("⏹ 已取消生成")
+                return
+            checked_files = reviewed_files
+            if not checked_files:
+                QMessageBox.warning(self, "沒有可生成檔案", "選取的檔案都已略過。")
                 return
             
             # 保存設定
@@ -1901,20 +2071,6 @@ class MainWindow(QMainWindow):
             self.progress_bar.setValue(0)
             
             # 創建並啟動工作線程
-            date = self.date_input.text().strip()
-            if not is_valid_mmdd(date):
-                QMessageBox.warning(self, "警告", "日期格式錯誤，請輸入 MMDD，例如 0813")
-                self.batch_generation_active = False
-                self.batch_pending_files.clear()
-                self.batch_completed_files.clear()
-                self.batch_failed_files.clear()
-                self.update_generation_stats()
-                self.start_btn.setEnabled(True)
-                self.start_btn.setText("▶ 開始生成")
-                self.pause_btn.hide()
-                return
-            last_folder = self.settings.get("last_folder", os.getcwd())
-            
             self.worker = GenerationWorker(
                 checked_files, date, creator, last_folder, self.thumbnail_overrides
             )
@@ -2164,8 +2320,24 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "AutoNightYT.ThumbnailGenerator"
+            )
+        except (AttributeError, OSError):
+            pass
+
     app = QApplication(sys.argv)
+    icon_path = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "icon.png"
+    app_icon = QIcon(str(icon_path))
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
+
     window = MainWindow()
+    if not app_icon.isNull():
+        window.setWindowIcon(app_icon)
     window.show()
     sys.exit(app.exec())
 

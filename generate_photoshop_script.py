@@ -1368,14 +1368,14 @@ function setTitleKerningAtRangePosition(textLayer, value, rangePosition) {
     executeAction(charIDToTypeID("setd"), setDescriptor, DialogModes.NO);
 }
 
-function formatCornerBrackets(textLayer, percentFontSize) {
+function formatCornerBrackets(textLayer, percentFontSize, openingBaselineShift) {
     if (!textLayer) return;
     var content = textLayer.textItem.contents;
     var contentWithoutTrailingWhitespace = content.replace(/\\s+$/, "");
     for (var characterIndex = 0; characterIndex < content.length; characterIndex++) {
         var character = content.charAt(characterIndex);
         if (character === "「") {
-            setCornerBracketStyleAt(textLayer, characterIndex, 400, 80);
+            setCornerBracketStyleAt(textLayer, characterIndex, 400, openingBaselineShift);
         } else if (character === "」") {
             setCornerBracketStyleAt(textLayer, characterIndex, 400, null);
         }
@@ -1694,8 +1694,12 @@ try {
         // EFFECT_WORDS_LOGIC_PLACEHOLDER
 
         // 中文引號縮小並收緊前後字距。
-        formatCornerBrackets(titleLayer1, PERCENT_FONT_SIZE_PLACEHOLDER);
-        formatCornerBrackets(titleLayer2, PERCENT_FONT_SIZE_PLACEHOLDER);
+        formatCornerBrackets(
+            titleLayer1, PERCENT_FONT_SIZE_PLACEHOLDER, OPENING_BRACKET_BASELINE_SHIFT_PLACEHOLDER
+        );
+        formatCornerBrackets(
+            titleLayer2, PERCENT_FONT_SIZE_PLACEHOLDER, OPENING_BRACKET_BASELINE_SHIFT_PLACEHOLDER
+        );
         
         // 設定第一行大標最後一個字的基線位移，在 resize 之後執行。
         setLastCharBaselineShift(titleLayer1, TITLE1_BASELINE_SHIFT_PLACEHOLDER);
@@ -1959,6 +1963,7 @@ try {
         )
         title1_baseline_shift = -17.88
         percent_font_size = 200
+        opening_bracket_baseline_shift = 'null'
         layout_specific_logic = build_labeled_layout_logic(result_data)
     else:
         title_resize_logic = (
@@ -1969,6 +1974,7 @@ try {
         )
         title1_baseline_shift = -30
         percent_font_size = 350
+        opening_bracket_baseline_shift = '80'
         layout_specific_logic = ''
 
     # Perform replacements manually
@@ -1992,6 +1998,7 @@ try {
         "TITLE_RESIZE_LOGIC_PLACEHOLDER": title_resize_logic,
         "TITLE1_BASELINE_SHIFT_PLACEHOLDER": title1_baseline_shift,
         "PERCENT_FONT_SIZE_PLACEHOLDER": percent_font_size,
+        "OPENING_BRACKET_BASELINE_SHIFT_PLACEHOLDER": opening_bracket_baseline_shift,
         "LAYOUT_SPECIFIC_LOGIC_PLACEHOLDER": layout_specific_logic,
         "LINE2_SPECIAL1_COLOR": line2_colors['special1'],
         "SPECIAL_TEXT_4": special_text_4,
@@ -2068,15 +2075,15 @@ def run_generation_logic(
     if not os.path.exists(file_path):
         print(f"錯誤: 找不到輸入的文字檔: {file_path}")
         return 1
-    result = prepare_file_data(file_path, effective_date, image_root)
+    result = prepare_file_data(
+        file_path,
+        effective_date,
+        image_root,
+        result_overrides=result_overrides,
+    )
     if not result:
         print("解析失敗")
         return 1
-
-    # GUI 可針對單一縮圖覆寫文字設定；不改寫原始文字檔。
-    for key in ("anchor", "left_text", "title_line1", "title_line2"):
-        if result_overrides and key in result_overrides:
-            result[key] = str(result_overrides[key])
 
     if result.get('validation_errors'):
         print("\n⚠ 此檔案略過：")

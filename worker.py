@@ -99,8 +99,13 @@ class GenerationWorker(QThread):
                         failed_count += 1
                         continue
 
-                    # 先判定版型並驗證標圖版的圖片指示／圖片路徑。
-                    parsed = prepare_file_data(file_path, self.date)
+                    # 本次 GUI 覆寫要在驗證與圖片配對前套用，原始文字檔不會被改寫。
+                    file_config = dict(self.file_configs.get(filename, {}))
+                    parsed = prepare_file_data(
+                        file_path,
+                        self.date,
+                        result_overrides=file_config,
+                    )
                     if not parsed:
                         warning_message = f"{filename}\n解析失敗，已略過該檔。"
                         self.log.emit(f"⚠️ {warning_message.replace(chr(10), ' ')}")

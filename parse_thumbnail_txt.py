@@ -33,6 +33,7 @@ EXCLUDED_EFFECT_KEYWORDS = ["大底黑色", "何橞瑢", "漫畫驚訝調暗暗"
 # 這些括號內容是版面／效果控制指示，不是圖片名稱。
 # 圖片指示不要求含有「圖」字，因此只排除已知的控制格式。
 NON_IMAGE_INSTRUCTION_KEYWORDS = ["超大字", *EXCLUDED_EFFECT_KEYWORDS]
+IGNORED_IMAGE_NOTES = {"隔天上"}
 
 LAYOUT_BIG_TITLE = "大標版"
 LAYOUT_IMAGE_TITLE = "標圖版"
@@ -40,10 +41,17 @@ DEFAULT_IMAGE_ROOT = r"\\10.227.63.105\public\__CG-IN"
 DEFAULT_TEXT_ROOT = r"\\10.227.58.117\新聞txt"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 LEFT_MARKER_PATTERN = r"左邊(?:直)?字"
+TEXT_OVERRIDE_KEYS = ("anchor", "left_text", "title_line1", "title_line2")
+
+
+def _normalize_structural_brackets(value):
+    """把編輯常混用的全形括號轉成既有解析器使用的半形括號。"""
+    return str(value or "").replace("（", "(").replace("）", ")")
 
 
 def _is_parenthesized_line(value):
-    """整行必須只包含一組半形括號，才視為圖片指示。"""
+    """整行必須只包含一組括號，才視為有明確包裝的圖片指示。"""
+    value = _normalize_structural_brackets(value)
     return bool(re.fullmatch(r"\([^()]+\)", value.strip()))
 
 
@@ -70,28 +78,117 @@ def _extract_explicit_image_instruction(value):
     return [part for part in re.split(r"\s+", match.group(1).strip()) if part] if match else []
 
 
-def _parse_left_marker(line):
-    """解析左邊字標記，支援文字在標記外或括號內兩種格式。"""
-    stripped = line.strip()
+def _clean_image_instruction_content(value):
+    """移除「定／定格」等放圖指令；「定圖」保留既有候選名稱語意。"""
+    content = str(value or "").strip()
+    if not content or content in IGNORED_IMAGE_NOTES:
+        return "", []
 
-    embedded_match = re.fullmatch(
+    explicit_images = _extract_explicit_image_instruction(content)
+    if explicit_images:
+        return " ".join(explicit_images), explicit_images
+
+    # 舊檔的「定格」是「定」的誤寫，兩者都只代表放入圖片。
+    content = re.sub(r"^定格\s*", "", content, count=1).strip()
+    content = re.sub(r"^定\s*", "", content, count=1).strip()
+    if not content or content in IGNORED_IMAGE_NOTES or _is_non_image_instruction(content):
+        return "", []
+    if content == "辣晚報精華" or any(anchor in content for anchor in ANCHOR_NAMES):
+        return "", []
+    return content, []
+
+
+def _extract_parenthesized_image_parts(value):
+    """解析 `(圖片A)+(圖片B)`、`(圖片)(隔天上)` 與 `(圖片)@`。"""
+    candidate = _normalize_structural_brackets(value).strip()
+    position = 0
+    contents = []
+    while position < len(candidate):
+        match = re.match(r"\s*\+?\s*\(([^()]*)\)", candidate[position:])
+        if not match:
+            break
+        contents.append(match.group(1).strip())
+        position += match.end()
+
+    remainder = candidate[position:].strip()
+    if not contents or remainder not in ("", "@"):
+        return []
+    return contents
+
+
+def _parse_left_marker(line):
+    """解析左邊字標記，兼容括號、無括號、冒號及同行圖片格式。"""
+    stripped = _normalize_structural_brackets(line).strip()
+
+    embedded_match = re.search(
         rf"\(\s*({LEFT_MARKER_PATTERN})\s*[:：]\s*(.*?)\s*\)",
         stripped,
     )
     if embedded_match:
+        before = stripped[:embedded_match.start()].strip()
+        if before:
+            return None
         return {
             "label": embedded_match.group(1),
             "left_text": embedded_match.group(2).strip(),
             "embedded": True,
+            "inline_image_hint": stripped[embedded_match.end():].strip().lstrip("+").strip(),
         }
 
-    marker_match = re.search(rf"\(\s*({LEFT_MARKER_PATTERN})\s*\)", line)
+    marker_match = re.search(rf"\(\s*({LEFT_MARKER_PATTERN})\s*\)", stripped)
     if marker_match:
-        left_text = re.sub(rf"\(\s*{LEFT_MARKER_PATTERN}\s*\)", "", line).strip()
+        left_text = re.sub(rf"\(\s*{LEFT_MARKER_PATTERN}\s*\)", "", stripped).strip()
         return {
             "label": marker_match.group(1),
             "left_text": left_text,
             "embedded": False,
+            "inline_image_hint": "",
+        }
+
+    # 沒有括號的冒號格式，例如「左邊字：挑釁中國」。
+    unwrapped_embedded = re.fullmatch(
+        rf"\s*({LEFT_MARKER_PATTERN})\s*[:：]\s*(.*?)\s*",
+        stripped,
+    )
+    if unwrapped_embedded:
+        left_text = unwrapped_embedded.group(2).strip()
+        inline_image_hint = ""
+        trailing_image = re.search(r"\s*(\+?\s*\([^()]+\))\s*$", left_text)
+        if trailing_image:
+            inline_image_hint = trailing_image.group(1).strip().lstrip("+").strip()
+            left_text = left_text[:trailing_image.start()].strip()
+        return {
+            "label": unwrapped_embedded.group(1),
+            "left_text": left_text,
+            "embedded": True,
+            "inline_image_hint": inline_image_hint,
+        }
+
+    # 沒有括號且標記在行首，例如「左邊字索討救命油」。
+    unwrapped_prefix = re.fullmatch(
+        rf"\s*({LEFT_MARKER_PATTERN})\s*(.+?)\s*",
+        stripped,
+    )
+    if unwrapped_prefix:
+        return {
+            "label": unwrapped_prefix.group(1),
+            "left_text": unwrapped_prefix.group(2).strip(),
+            "embedded": False,
+            "inline_image_hint": "",
+        }
+
+    # 沒有括號的行尾標記，例如「挑釁中國 左邊字」。
+    unwrapped_inline = re.fullmatch(
+        rf"\s*(.*?)\s*({LEFT_MARKER_PATTERN})(\s*\+?\s*\([^()]+\))?\s*",
+        stripped,
+    )
+    if unwrapped_inline:
+        inline_image_hint = (unwrapped_inline.group(3) or "").strip().lstrip("+").strip()
+        return {
+            "label": unwrapped_inline.group(2),
+            "left_text": unwrapped_inline.group(1).strip(),
+            "embedded": False,
+            "inline_image_hint": inline_image_hint,
         }
 
     return None
@@ -102,30 +199,110 @@ def _is_left_marker_effect(value):
     return bool(re.fullmatch(rf"\s*{LEFT_MARKER_PATTERN}(?:\s*[:：].*)?\s*", value.strip()))
 
 
-def _find_nearby_image_instruction(lines, marker_index, prefer_after=False):
-    """找左邊字附近的圖片指示；舊格式在上一行，新括號格式常在下一行。"""
+def _extract_image_instruction_candidate(value, allow_unwrapped=False):
+    """解析單一圖片指示候選，並排除效果字、主播及大標文字。"""
+    candidate = _normalize_structural_brackets(value).strip()
+    if _parse_left_marker(candidate):
+        return "", []
+
+    parenthesized_parts = _extract_parenthesized_image_parts(candidate)
+    if parenthesized_parts:
+        instructions = []
+        all_alternatives = []
+        for content in parenthesized_parts:
+            instruction, alternatives = _clean_image_instruction_content(content)
+            if not instruction:
+                continue
+            instructions.append(instruction)
+            all_alternatives.extend(alternatives)
+        if not instructions:
+            return "", []
+        # 單一「定圖」可維持空格候選；多個括號則代表依序放入多張圖。
+        if len(instructions) == 1 and all_alternatives:
+            return instructions[0], all_alternatives
+        return "+".join(instructions), []
+
+    candidate = re.sub(r"^\+\s*", "", candidate)
+    if allow_unwrapped:
+        content = candidate
+        # 無括號格式較容易與大標混淆，只接受乾淨的單行名稱。
+        if not content or any(character in content for character in ('"', "(", ")")):
+            return "", []
+    else:
+        return "", []
+
+    return _clean_image_instruction_content(content)
+
+
+def _previous_separate_left_text(lines, marker_index):
+    """支援純標記寫在左邊字內容的上一行或下一行。"""
+    for direction in (-1, 1):
+        index = marker_index + direction
+        while 0 <= index < len(lines) and not lines[index].strip():
+            index += direction
+        if not 0 <= index < len(lines):
+            continue
+
+        candidate = lines[index].strip()
+        if _is_parenthesized_line(candidate) or _parse_left_marker(candidate):
+            continue
+        if _is_non_image_instruction(candidate):
+            continue
+        if direction == 1:
+            # 標記在前的舊格式必須是「標記／左邊字／定圖」三行，
+            # 避免把缺少左邊字的第一行大標誤認為左邊字。
+            following_index = index + 1
+            while (
+                following_index < len(lines)
+                and not lines[following_index].strip()
+            ):
+                following_index += 1
+            if following_index >= len(lines):
+                continue
+            following = lines[following_index].strip()
+            following_without_wrapper = re.sub(
+                r"^\s*\+?\s*\(?\s*", "", following
+            )
+            if not re.match(r"^定(?:圖|格|\s)", following_without_wrapper):
+                continue
+        return candidate, index
+    return "", marker_index
+
+
+def _find_nearby_image_instruction(
+    lines, marker_index, prefer_after=False, allow_unwrapped_after=False
+):
+    """找左邊字附近的圖片指示；先找括號格式，再安全回退到無括號格式。"""
     directions = (1, -1) if prefer_after else (-1, 1)
 
+    nearby = []
     for direction in directions:
         index = marker_index + direction
-        while 0 <= index < len(lines):
-            candidate = lines[index].strip()
-            if not candidate:
-                index += direction
-                continue
+        while 0 <= index < len(lines) and not lines[index].strip():
+            index += direction
+        if 0 <= index < len(lines):
+            nearby.append((direction, index, lines[index].strip()))
 
-            # 有些文字檔會在圖片指示括號前加上 +，例如 +(定圖 用今天 妤史努比)。
-            image_candidate = re.sub(r"^\+\s*", "", candidate)
-            if _is_parenthesized_line(image_candidate) and not _parse_left_marker(image_candidate):
-                content = image_candidate[1:-1].strip()
-                explicit_images = _extract_explicit_image_instruction(content)
-                if explicit_images:
-                    return " ".join(explicit_images), explicit_images
-                if not _is_non_image_instruction(content):
-                    return content, []
-            break
+    # 明確括號的候選永遠優先，避免把相鄰大標誤認成圖片。
+    for _direction, index, candidate in nearby:
+        instruction, alternatives = _extract_image_instruction_candidate(candidate)
+        if instruction:
+            return instruction, alternatives, index
 
-    return "", []
+    # 舊格式及拆行格式的圖片在左邊字上方；不往下猜大標。
+    fallback_candidates = (
+        nearby
+        if prefer_after or allow_unwrapped_after
+        else [item for item in nearby if item[0] == -1]
+    )
+    for _direction, index, candidate in fallback_candidates:
+        instruction, alternatives = _extract_image_instruction_candidate(
+            candidate, allow_unwrapped=True
+        )
+        if instruction:
+            return instruction, alternatives, index
+
+    return "", [], None
 
 
 def _normalize_image_text(value):
@@ -320,11 +497,50 @@ def resolve_image_path(result, mmdd, image_root=DEFAULT_IMAGE_ROOT):
     return (image_paths[0] if image_paths else None), image_error
 
 
-def prepare_file_data(file_path, mmdd, image_root=DEFAULT_IMAGE_ROOT):
+def is_unclosed_quote_error(value):
+    """辨識可由本次大標覆寫修正的引號驗證錯誤。"""
+    return "未閉合的引號" in str(value or "")
+
+
+def apply_text_result_overrides(result, result_overrides=None):
+    """套用 GUI 本次文字覆寫並重新驗證引號，不改寫原始文字檔。"""
+    if not result:
+        return result
+
+    overrides = result_overrides or {}
+    for key in TEXT_OVERRIDE_KEYS:
+        if key in overrides:
+            result[key] = str(overrides[key])
+
+    errors = [
+        error
+        for error in result.get("validation_errors", [])
+        if not is_unclosed_quote_error(error)
+    ]
+    for title_label, title_text in (
+        ("第一行大標", result.get("title_line1", "")),
+        ("第二行大標", result.get("title_line2", "")),
+    ):
+        if str(title_text or "").count('"') % 2:
+            errors.append(f"{title_label}發現未閉合的引號：{title_text}")
+
+    result["validation_errors"] = errors
+    result["is_valid"] = not errors
+    return result
+
+
+def prepare_file_data(
+    file_path,
+    mmdd,
+    image_root=DEFAULT_IMAGE_ROOT,
+    result_overrides=None,
+):
     """解析並驗證版型；標圖版同時完成圖片配對。"""
     result = parse_file(file_path)
     if not result:
         return None
+
+    apply_text_result_overrides(result, result_overrides)
 
     errors = list(result.get("validation_errors", []))
     if result.get("layout_type") == LAYOUT_IMAGE_TITLE and not errors:
@@ -422,6 +638,7 @@ def parse_file(file_path):
         "validation_errors": [],
         "is_valid": True,
     }
+    image_instruction_line_indexes = set()
     
     lines = []
     # 嘗試多種編碼讀取
@@ -441,6 +658,9 @@ def parse_file(file_path):
         return None
 
     try:
+        # 編輯可能混用半形、全形，甚至只改到單邊括號；解析前統一結構符號。
+        lines = [_normalize_structural_brackets(line) for line in lines]
+
         # 1. 第一行定義為Slag，如果第一行為空則使用檔名
         if lines and lines[0].strip():
             result["slag"] = lines[0].strip()
@@ -460,7 +680,7 @@ def parse_file(file_path):
                 break
 
         # 2.1 判定版型並解析標圖版欄位。
-        # 舊格式：圖片指示在左邊字上一個非空括號行。
+        # 舊格式：圖片指示在左邊字上一個非空行；括號可省略或混用全半形。
         # 新格式：(左邊字:文字) / (左邊直字:文字) 優先取下一個非空括號行為圖片指示。
         left_markers = [
             (i, marker_info)
@@ -475,18 +695,35 @@ def parse_file(file_path):
 
             marker_index, marker_info = left_markers[0]
             left_text = marker_info["left_text"]
+            image_search_index = marker_index
+            separate_left_text = not bool(left_text)
+            if not left_text:
+                left_text, image_search_index = _previous_separate_left_text(lines, marker_index)
             if not left_text:
                 result["validation_errors"].append("左邊字標記沒有文字內容")
             result["left_text"] = left_text
 
-            image_instruction, image_instruction_candidates = _find_nearby_image_instruction(
-                lines,
-                marker_index,
-                prefer_after=marker_info["embedded"],
+            image_instruction, image_instruction_candidates = _extract_image_instruction_candidate(
+                marker_info.get("inline_image_hint", "")
             )
+            if image_instruction:
+                image_instruction_line_indexes.add(marker_index)
+            if not image_instruction:
+                (
+                    image_instruction,
+                    image_instruction_candidates,
+                    image_instruction_index,
+                ) = _find_nearby_image_instruction(
+                    lines,
+                    image_search_index,
+                    prefer_after=marker_info["embedded"],
+                    allow_unwrapped_after=separate_left_text,
+                )
+                if image_instruction_index is not None:
+                    image_instruction_line_indexes.add(image_instruction_index)
             if not image_instruction:
                 result["validation_errors"].append(
-                    "找到左邊字標記，但附近找不到完整括號包住的圖片指示"
+                    "找到左邊字標記，但附近找不到可辨識的圖片指示"
                 )
             else:
                 result["image_instruction"] = image_instruction
@@ -497,7 +734,12 @@ def parse_file(file_path):
         for i, line in enumerate(lines):
             stripped = line.strip()
             # 跳過前面的元数据行和空行
-            if stripped and not any(anchor in line for anchor in ANCHOR_NAMES) and i > 0:
+            if (
+                stripped
+                and not any(anchor in line for anchor in ANCHOR_NAMES)
+                and i > 0
+                and i not in image_instruction_line_indexes
+            ):
                 # 檢查是否是大標行
                 if re.search(r'[a-zA-Z0-9\u4e00-\u9fff""]', stripped):
                     non_empty_lines.append(stripped)
@@ -534,13 +776,20 @@ def parse_file(file_path):
         # 5. 找出效果字
         effect_pattern = r'\(([^)]+)\)'
         effect_matches = re.findall(effect_pattern, full_text)
+        parsed_image_parts = set(_image_instruction_parts(result.get("image_instruction", "")))
         
         for effect in effect_matches:
             stripped_effect = effect.strip()
+            cleaned_effect, _effect_alternatives = _clean_image_instruction_content(
+                stripped_effect
+            )
             if (
                 _is_left_marker_effect(stripped_effect)
                 or stripped_effect == result.get("image_instruction")
                 or _extract_explicit_image_instruction(stripped_effect)
+                or stripped_effect in IGNORED_IMAGE_NOTES
+                or cleaned_effect == result.get("image_instruction")
+                or (cleaned_effect and cleaned_effect in parsed_image_parts)
             ):
                 continue
             should_exclude = False
