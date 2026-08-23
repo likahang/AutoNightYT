@@ -34,6 +34,7 @@ EXCLUDED_EFFECT_KEYWORDS = ["大底黑色", "何橞瑢", "漫畫驚訝調暗暗"
 # 圖片指示不要求含有「圖」字，因此只排除已知的控制格式。
 NON_IMAGE_INSTRUCTION_KEYWORDS = ["超大字", *EXCLUDED_EFFECT_KEYWORDS]
 IGNORED_IMAGE_NOTES = {"隔天上"}
+RECOVERABLE_EFFECT_SUFFIX_MARKERS = ("漫畫爆炸", "漫畫驚訝", "卡通大火")
 
 LAYOUT_BIG_TITLE = "大標版"
 LAYOUT_IMAGE_TITLE = "標圖版"
@@ -47,6 +48,25 @@ TEXT_OVERRIDE_KEYS = ("anchor", "left_text", "title_line1", "title_line2")
 def _normalize_structural_brackets(value):
     """把編輯常混用的全形括號轉成既有解析器使用的半形括號。"""
     return str(value or "").replace("（", "(").replace("）", ")")
+
+
+def _repair_missing_effect_opening_parenthesis(value):
+    """修復行尾效果字只有右括號的常見輸入錯誤。"""
+    text = str(value or "")
+    stripped = text.rstrip()
+    if not stripped.endswith(")") or stripped.count(")") <= stripped.count("("):
+        return text
+
+    body = stripped[:-1].rstrip()
+    if not body:
+        return text
+    parts = body.rsplit(None, 1)
+    effect = parts[-1]
+    if not any(marker in effect for marker in RECOVERABLE_EFFECT_SUFFIX_MARKERS):
+        return text
+
+    repaired = f"({effect})" if len(parts) == 1 else f"{parts[0].rstrip()} ({effect})"
+    return repaired + text[len(stripped):]
 
 
 def _is_parenthesized_line(value):
@@ -659,7 +679,10 @@ def parse_file(file_path):
 
     try:
         # 編輯可能混用半形、全形，甚至只改到單邊括號；解析前統一結構符號。
-        lines = [_normalize_structural_brackets(line) for line in lines]
+        lines = [
+            _repair_missing_effect_opening_parenthesis(_normalize_structural_brackets(line))
+            for line in lines
+        ]
 
         # 1. 第一行定義為Slag，如果第一行為空則使用檔名
         if lines and lines[0].strip():

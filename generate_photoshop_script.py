@@ -471,14 +471,6 @@ def build_labeled_layout_logic(result_data):
         doc.activeLayer = layers[0];
     }}
 
-    function fitLabeledTitleMaxWidth(layer, maxWidth) {{
-        if (!layer) return;
-        var b = labeledLayerBounds(layer);
-        if (b.width > maxWidth) {{
-            layer.resize(maxWidth / b.width * 100, 100, AnchorPosition.MIDDLELEFT);
-        }}
-    }}
-
     function setLabeledKerning(layer, value, fromIndex, toIndex) {{
         doc.activeLayer = layer;
         var layerRef = new ActionReference();
@@ -523,10 +515,6 @@ def build_labeled_layout_logic(result_data):
         // 保留 5% 陰影安全距離，避免數字圖層壓到下方主文字。
         return Math.max(0, gapBounds.height - compactBounds.height) * 0.95;
     }}
-
-    // 大標沿用舊流程後，再確保標圖版最終上限。
-    if (typeof titleLayer1 !== "undefined") fitLabeledTitleMaxWidth(titleLayer1, 1400);
-    if (typeof titleLayer2 !== "undefined") fitLabeledTitleMaxWidth(titleLayer2, 1340);
 
     // 左邊字完全忽略引號變色；單一半形數字／標點轉全形，連續兩字元以上另建橫向圖層。
     var verticalGroup = findLayer("直標", doc);
@@ -1368,22 +1356,26 @@ function setTitleKerningAtRangePosition(textLayer, value, rangePosition) {
     executeAction(charIDToTypeID("setd"), setDescriptor, DialogModes.NO);
 }
 
-function formatCornerBrackets(textLayer, percentFontSize, openingBaselineShift) {
+function formatCornerBrackets(
+        textLayer, percentFontSize, cornerBracketFontSize, openingBaselineShift) {
     if (!textLayer) return;
     var content = textLayer.textItem.contents;
     var contentWithoutTrailingWhitespace = content.replace(/\\s+$/, "");
-    for (var characterIndex = 0; characterIndex < content.length; characterIndex++) {
-        var character = content.charAt(characterIndex);
-        if (character === "「") {
-            setCornerBracketStyleAt(textLayer, characterIndex, 400, openingBaselineShift);
-        } else if (character === "」") {
-            setCornerBracketStyleAt(textLayer, characterIndex, 400, null);
+    if (cornerBracketFontSize !== null) {
+        for (var characterIndex = 0; characterIndex < content.length; characterIndex++) {
+            var character = content.charAt(characterIndex);
+            if (character === "「") {
+                setCornerBracketStyleAt(
+                    textLayer, characterIndex, cornerBracketFontSize, openingBaselineShift
+                );
+            } else if (character === "」") {
+                setCornerBracketStyleAt(textLayer, characterIndex, cornerBracketFontSize, null);
+            }
         }
     }
     // % 使用版型固定字級；同行多個 % 在同一個 ActionList 一次寫入。
     setTitlePercentSignsSize(textLayer, content, percentFontSize);
     var openingHasTextBefore = false;
-    var leadingOpeningBracket = content.length > 0 && content.charAt(0) === "「";
     for (var kerningCharacterIndex = 0; kerningCharacterIndex < content.length; kerningCharacterIndex++) {
         var kerningCharacter = content.charAt(kerningCharacterIndex);
         if (kerningCharacter === "「") {
@@ -1393,13 +1385,40 @@ function formatCornerBrackets(textLayer, percentFontSize, openingBaselineShift) 
                 setTitleKerningAtRangePosition(textLayer, -300, kerningCharacterIndex - 1);
             }
         } else if (kerningCharacter === "」") {
-            if (openingHasTextBefore) {
-                // 對應的「前方有文字時，」後方也設定 Kerning -300。
-                setTitleKerningAtRangePosition(textLayer, -300, kerningCharacterIndex + 1);
+            if (openingHasTextBefore &&
+                    kerningCharacterIndex < contentWithoutTrailingWhitespace.length - 1) {
+                // 對應的「前方有文字且」後方仍有文字時，只收緊」的後方字距。
+                setTitleKerningAtRangePosition(textLayer, -300, kerningCharacterIndex);
             }
             openingHasTextBefore = false;
         }
     }
+
+    var bookOpeningHasTextBefore = false;
+    for (var bookCharacterIndex = 0; bookCharacterIndex < content.length; bookCharacterIndex++) {
+        var bookCharacter = content.charAt(bookCharacterIndex);
+        if (bookCharacter === "《") {
+            bookOpeningHasTextBefore = bookCharacterIndex > 0;
+            if (bookOpeningHasTextBefore) {
+                // 《前方有文字時，設定《前方 Kerning 2300。
+                setTitleKerningAtRangePosition(textLayer, 2300, bookCharacterIndex - 1);
+            }
+        } else if (bookCharacter === "》") {
+            if (bookCharacterIndex < contentWithoutTrailingWhitespace.length - 1) {
+                // 》後方仍有文字時，設定》後方 Kerning -200。
+                setTitleKerningAtRangePosition(textLayer, -200, bookCharacterIndex);
+            }
+            bookOpeningHasTextBefore = false;
+        }
+    }
+}
+
+function adjustCornerBracketTitleGeometry(textLayer) {
+    if (!textLayer) return;
+    var content = textLayer.textItem.contents;
+    var contentWithoutTrailingWhitespace = content.replace(/\\s+$/, "");
+    var leadingOpeningBracket = content.length > 0 && content.charAt(0) === "「";
+    var leadingBookBracket = content.length > 0 && content.charAt(0) === "《";
     if (contentWithoutTrailingWhitespace.length > 0 &&
             contentWithoutTrailingWhitespace.charAt(contentWithoutTrailingWhitespace.length - 1) === "」") {
         // 」後方沒有文字：固定大標左側，只將寬度往右增加 70px。
@@ -1416,6 +1435,10 @@ function formatCornerBrackets(textLayer, percentFontSize, openingBaselineShift) 
     if (leadingOpeningBracket) {
         // 行首「前方沒有文字：不設 Kerning，整行固定向左移 140px。
         textLayer.translate(-140, 0);
+    }
+    if (leadingBookBracket) {
+        // 行首《前方沒有文字：不設 Kerning，整行固定向左移 100px。
+        textLayer.translate(-100, 0);
     }
 }
 
@@ -1688,18 +1711,24 @@ try {
         colorQuotedText(titleLayer2, "SPECIAL_TEXT_3", "LINE2_SPECIAL1_COLOR");
         colorQuotedText(titleLayer2, "SPECIAL_TEXT_4", "LINE2_SPECIAL2_COLOR");
         
-        // Resize title layers first
-        TITLE_RESIZE_LOGIC_PLACEHOLDER
-        
         // EFFECT_WORDS_LOGIC_PLACEHOLDER
 
-        // 中文引號縮小並收緊前後字距。
+        // 先完成效果字、特殊字級與 Kerning，再決定大標最終寬度。
         formatCornerBrackets(
-            titleLayer1, PERCENT_FONT_SIZE_PLACEHOLDER, OPENING_BRACKET_BASELINE_SHIFT_PLACEHOLDER
+            titleLayer1, PERCENT_FONT_SIZE_PLACEHOLDER,
+            CORNER_BRACKET_FONT_SIZE_PLACEHOLDER, OPENING_BRACKET_BASELINE_SHIFT_PLACEHOLDER
         );
         formatCornerBrackets(
-            titleLayer2, PERCENT_FONT_SIZE_PLACEHOLDER, OPENING_BRACKET_BASELINE_SHIFT_PLACEHOLDER
+            titleLayer2, PERCENT_FONT_SIZE_PLACEHOLDER,
+            CORNER_BRACKET_FONT_SIZE_PLACEHOLDER, OPENING_BRACKET_BASELINE_SHIFT_PLACEHOLDER
         );
+
+        // 僅做水平變形；垂直比例固定 100%。
+        TITLE_RESIZE_LOGIC_PLACEHOLDER
+
+        // 行首／行尾中文引號的位置例外在最終寬度之後套用。
+        adjustCornerBracketTitleGeometry(titleLayer1);
+        adjustCornerBracketTitleGeometry(titleLayer2);
         
         // 設定第一行大標最後一個字的基線位移，在 resize 之後執行。
         setLastCharBaselineShift(titleLayer1, TITLE1_BASELINE_SHIFT_PLACEHOLDER);
@@ -1912,6 +1941,8 @@ try {
 }
 """
 
+    is_labeled_layout = result_data.get('layout_type') == LAYOUT_IMAGE_TITLE
+
     # Generate Effect Words Logic
     effect_words_logic = ""
     if effect_map and result_data.get('effect_words'):
@@ -1947,14 +1978,22 @@ try {
                            match = re.search(r'(\d+)', action)
                            if match:
                                size_val = match.group(1)
+                               size_val_line1 = size_val
+                               size_val_line2 = size_val
+                               if keyword in {"字小", "字可以小一點"}:
+                                   if is_labeled_layout:
+                                       size_val_line1 = "250"
+                                       size_val_line2 = "245"
+                                   else:
+                                       size_val_line1 = "450"
+                                       size_val_line2 = "441"
                                t_esc = escape_js_string(target_text)
                                effect_words_logic += f'    // Effect: {keyword} -> {action}\n'
-                               effect_words_logic += f'    changeFontSizePart(titleLayer1, "{t_esc}", {size_val});\n'
-                               effect_words_logic += f'    changeFontSizePart(titleLayer2, "{t_esc}", {size_val});\n'
+                               effect_words_logic += f'    changeFontSizePart(titleLayer1, "{t_esc}", {size_val_line1});\n'
+                               effect_words_logic += f'    changeFontSizePart(titleLayer2, "{t_esc}", {size_val_line2});\n'
 
-    is_labeled_layout = result_data.get('layout_type') == LAYOUT_IMAGE_TITLE
     if is_labeled_layout:
-        # 沿用原本大標1的1380px；大標2在標圖版改為1340px。
+        # 標圖版只做水平變形：大標1至1380px、大標2至1340px，垂直比例維持100%。
         title_resize_logic = (
             'titleLayer1.resize(1380 / (titleLayer1.bounds[2] - titleLayer1.bounds[0]) * 100, '
             '100, AnchorPosition.MIDDLELEFT);\n'
@@ -1963,6 +2002,7 @@ try {
         )
         title1_baseline_shift = -17.88
         percent_font_size = 200
+        corner_bracket_font_size = 'null'
         opening_bracket_baseline_shift = 'null'
         layout_specific_logic = build_labeled_layout_logic(result_data)
     else:
@@ -1974,6 +2014,7 @@ try {
         )
         title1_baseline_shift = -30
         percent_font_size = 350
+        corner_bracket_font_size = '400'
         opening_bracket_baseline_shift = '80'
         layout_specific_logic = ''
 
@@ -1998,6 +2039,7 @@ try {
         "TITLE_RESIZE_LOGIC_PLACEHOLDER": title_resize_logic,
         "TITLE1_BASELINE_SHIFT_PLACEHOLDER": title1_baseline_shift,
         "PERCENT_FONT_SIZE_PLACEHOLDER": percent_font_size,
+        "CORNER_BRACKET_FONT_SIZE_PLACEHOLDER": corner_bracket_font_size,
         "OPENING_BRACKET_BASELINE_SHIFT_PLACEHOLDER": opening_bracket_baseline_shift,
         "LAYOUT_SPECIFIC_LOGIC_PLACEHOLDER": layout_specific_logic,
         "LINE2_SPECIAL1_COLOR": line2_colors['special1'],

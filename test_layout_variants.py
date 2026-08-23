@@ -349,6 +349,23 @@ class LayoutParsingTests(unittest.TestCase):
         self.assertEqual("", result["image_instruction"])
         self.assertTrue(any("圖片指示" in message for message in result["validation_errors"]))
 
+    def test_missing_effect_opening_parenthesis_is_repaired(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "missing_effect_parenthesis.txt"
+            path.write_text(
+                "1800 晚報YT縮圖15 高市艱難開口\n"
+                "何橞瑢\n"
+                '日本人"恥辱" 綠色漫畫爆炸)\n'
+                '"高市"艱難開口\n',
+                encoding="utf-8",
+            )
+            result = parse_file(path)
+
+        self.assertEqual('日本人"恥辱"', result["title_line1"])
+        self.assertEqual('"高市"艱難開口', result["title_line2"])
+        self.assertIn("綠色漫畫爆炸", result["effect_words"])
+        self.assertTrue(result["is_valid"])
+
     def test_embedded_left_marker_can_carry_image_on_same_line(self):
         examples = (
             "(左邊字：震撼)+(左圖+右圖)",
@@ -467,6 +484,50 @@ class LayoutJsxTests(unittest.TestCase):
         self.label_result = parse_file(TEST_DIR / "1800 晚報YT縮圖 18 福建艦 殺美航母.txt")
         self.label_result["image_path"] = r"C:\images\18.福建艦.jpg"
 
+    def test_small_text_effect_uses_layout_specific_font_size(self):
+        effect_map = {
+            "字小": "文字大小改成400 px",
+            "字可以小一點": "文字大小改成400 px",
+        }
+        big_result = parse_file(TEST_DIR / "1800 晚報YT縮圖 19 通報全球 日失敗了.txt")
+        big_result["effect_words"] = ["通報 字小"]
+        big_script = generate_jsx_script(
+            big_result,
+            color_scheme(),
+            "晚報YT縮圖.psd",
+            "output",
+            effect_map=effect_map,
+            source_date="0813",
+        )
+        self.assertIn('changeFontSizePart(titleLayer1, "通報", 450)', big_script)
+        self.assertIn('changeFontSizePart(titleLayer2, "通報", 441)', big_script)
+        self.assertLess(
+            big_script.index('changeFontSizePart(titleLayer1, "通報", 450)'),
+            big_script.index("formatCornerBrackets(\n            titleLayer1"),
+        )
+        self.assertLess(
+            big_script.index("formatCornerBrackets(\n            titleLayer1"),
+            big_script.index("titleLayer1.resize(1500"),
+        )
+        self.assertLess(
+            big_script.index("titleLayer1.resize(1500"),
+            big_script.index("adjustCornerBracketTitleGeometry(titleLayer1)"),
+        )
+
+        labeled_result = dict(self.label_result)
+        labeled_result["effect_words"] = ["福建 字可以小一點"]
+        labeled_script = generate_jsx_script(
+            labeled_result,
+            color_scheme(),
+            "晚報YT縮圖(標圖版).psd",
+            "output",
+            effect_map=effect_map,
+            source_date="0813",
+        )
+        self.assertIn('changeFontSizePart(titleLayer1, "福建", 250)', labeled_script)
+        self.assertIn('changeFontSizePart(titleLayer2, "福建", 245)', labeled_script)
+        self.assertNotIn('changeFontSizePart(titleLayer1, "福建", 400)', labeled_script)
+
     def test_labeled_layout_contains_full_workflow(self):
         script = generate_jsx_script(
             self.label_result,
@@ -500,11 +561,14 @@ class LayoutJsxTests(unittest.TestCase):
         )
         self.assertIn("rotateLabeledTextLayersTogether(labeledTextLayersToRotate, -4.08)", script)
         self.assertNotIn("250 / numberBounds0.width", script)
+        self.assertIn("titleLayer1.resize(1380", script)
         self.assertIn("titleLayer2.resize(1340", script)
+        self.assertIn("100, AnchorPosition.MIDDLELEFT", script)
+        self.assertNotIn("fitLabeledTitleMaxWidth", script)
         self.assertIn("setLastCharBaselineShift(titleLayer1, -17.88)", script)
-        self.assertIn("titleLayer1, 200, null", script)
-        self.assertIn("titleLayer2, 200, null", script)
-        self.assertNotIn("titleLayer1, 200, 80", script)
+        self.assertIn("titleLayer1, 200,\n            null, null", script)
+        self.assertIn("titleLayer2, 200,\n            null, null", script)
+        self.assertNotIn("titleLayer1, 200,\n            400", script)
         self.assertIn("userMaskFeather", script)
         self.assertIn("18.福建艦", script)
 
@@ -610,12 +674,15 @@ class LayoutJsxTests(unittest.TestCase):
         self.assertIn("titleLayer1.resize(1500", script)
         self.assertIn("titleLayer2.resize(1560", script)
         self.assertIn("setLastCharBaselineShift(titleLayer1, -30)", script)
-        self.assertIn("titleLayer1, 350, 80", script)
-        self.assertIn("titleLayer2, 350, 80", script)
+        self.assertIn("titleLayer1, 350,\n            400, 80", script)
+        self.assertIn("titleLayer2, 350,\n            400, 80", script)
         self.assertIn(
-            "setCornerBracketStyleAt(textLayer, characterIndex, 400, openingBaselineShift)", script
+            "textLayer, characterIndex, cornerBracketFontSize, openingBaselineShift", script
         )
-        self.assertIn("setCornerBracketStyleAt(textLayer, characterIndex, 400, null)", script)
+        self.assertIn(
+            "setCornerBracketStyleAt(textLayer, characterIndex, cornerBracketFontSize, null)",
+            script,
+        )
         self.assertIn('charIDToTypeID("From")', script)
         self.assertIn('charIDToTypeID("T   ")', script)
         self.assertIn('charIDToTypeID("Krng")', script)
@@ -631,7 +698,16 @@ class LayoutJsxTests(unittest.TestCase):
             "setTitleKerningAtRangePosition(textLayer, -300, kerningCharacterIndex - 1)", script
         )
         self.assertIn(
+            "setTitleKerningAtRangePosition(textLayer, -300, kerningCharacterIndex);", script
+        )
+        self.assertNotIn(
             "setTitleKerningAtRangePosition(textLayer, -300, kerningCharacterIndex + 1)", script
+        )
+        self.assertIn(
+            "kerningCharacterIndex < contentWithoutTrailingWhitespace.length - 1", script
+        )
+        self.assertNotIn(
+            "setTitleKerningAtRangePosition(textLayer, -100, kerningCharacterIndex - 1)", script
         )
         self.assertIn("var rangeEnd = textLength", script)
         self.assertIn("rangeStart = rangeEnd - 1", script)
@@ -645,12 +721,27 @@ class LayoutJsxTests(unittest.TestCase):
         )
         self.assertIn("(titleWidth + 70) / titleWidth * 100", script)
         self.assertIn("AnchorPosition.MIDDLELEFT", script)
+        self.assertIn('bookCharacter === "《"', script)
+        self.assertIn(
+            "setTitleKerningAtRangePosition(textLayer, 2300, bookCharacterIndex - 1)",
+            script,
+        )
+        self.assertIn('bookCharacter === "》"', script)
+        self.assertIn(
+            "bookCharacterIndex < contentWithoutTrailingWhitespace.length - 1", script
+        )
+        self.assertIn(
+            "setTitleKerningAtRangePosition(textLayer, -200, bookCharacterIndex)",
+            script,
+        )
+        self.assertIn('leadingBookBracket = content.length > 0 && content.charAt(0) === "《"', script)
+        self.assertIn("textLayer.translate(-100, 0)", script)
         self.assertNotIn("\\u200B", script)
         self.assertNotIn("getTitleTextHorizontalScale", script)
         self.assertNotIn("var minimumKerningPosition = -1", script)
         self.assertNotIn("setTitleInsertionKerning", script)
-        self.assertIn("titleLayer1, 350, 80", script)
-        self.assertIn("titleLayer2, 350, 80", script)
+        self.assertIn("titleLayer1, 350,\n            400, 80", script)
+        self.assertIn("titleLayer2, 350,\n            400, 80", script)
 
     def test_percent_sign_in_title_uses_seventy_percent_character_size(self):
         result = parse_file(TEST_DIR / "1800 晚報YT縮圖 19 通報全球 日失敗了.txt")
@@ -662,7 +753,7 @@ class LayoutJsxTests(unittest.TestCase):
         self.assertIn("setTitlePercentSignsSize(textLayer, content, percentFontSize)", script)
         self.assertIn("cloneCornerBracketStyle(sourceStyle, fixedFontSize, null)", script)
         self.assertIn("if (percentCount === 0) return", script)
-        self.assertIn("titleLayer1, 350, 80", script)
+        self.assertIn("titleLayer1, 350,\n            400, 80", script)
 
         labeled_result = dict(self.label_result)
         labeled_result["title_line1"] = "支持70%"
@@ -673,8 +764,9 @@ class LayoutJsxTests(unittest.TestCase):
             "output",
             source_date="0813",
         )
-        self.assertIn("titleLayer1, 200, null", labeled_script)
-        self.assertIn("titleLayer2, 200, null", labeled_script)
+        self.assertIn("titleLayer1, 200,\n            null, null", labeled_script)
+        self.assertIn("titleLayer2, 200,\n            null, null", labeled_script)
+        self.assertNotIn("titleLayer1, 200,\n            400", labeled_script)
         self.assertNotIn("getTitleGlyphVisibleHeight", labeled_script)
 
 

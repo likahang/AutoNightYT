@@ -1,6 +1,6 @@
 # 晚報 YouTube 縮圖生成器｜交接文件
 
-更新日期：2026-08-21
+更新日期：2026-08-23
 
 ## 1. 專案目前目標
 
@@ -8,15 +8,15 @@
 
 ## 2. 現在正在處理的任務
 
-本次只整理交接與建立可回復的 WIP checkpoint，沒有新增主要功能。最近一輪開發集中在：
+最近一輪開發已完成並準備部署 GitHub，集中在：
 
 - 圖片指示、缺圖與多圖的容錯。
 - 標圖版左邊字中數字／標點的獨立橫向圖層。
-- 大標 `「」` 與 `%` 的特殊排版。
+- 大標 `「」`、`《》`、`%`、效果字字級與最終寬度順序。
 - GUI 的縮圖設定欄、重新生成、工作階段紀錄與進度統計。
 - 配色資料改讀 Google Sheet 並保留快取及本地 CSV 後備。
 
-最新的 `%` 固定字級與中文引號位移規則已寫入程式與單元測試，但尚未經使用者在 Photoshop 視覺確認。
+最新規則已寫入程式與單元測試；Photoshop 視覺結果仍由使用者持續以本地預覽確認。
 
 ## 3. 這次已完成內容
 
@@ -49,23 +49,27 @@
 
 ### 3.4 大標文字規則
 
-- 標圖版：大標1 W 上限 1400px；大標2 W 上限 1340px；大標1最後一字 baseline shift `-17.88px`。
+- 標圖版：大標1只做水平變形至 W=1380px，大標2只做水平變形至 W=1340px，垂直比例固定 100%，不再套用額外最終上限；大標1最後一字 baseline shift `-17.88px`。
 - 大標版：大標1 W=1500px；大標2 W=1560px；大標1最後一字 baseline shift `-30px`。
-- `「`、`」` 字級設為 400pt，`「` baseline shift 設為 +80pt。
+- 大標寬度水平變形在效果字、特殊字級與 Kerning 完成後執行；行首 `「`／行尾 `」` 的位置例外最後套用。
+- 行尾已知效果字漏打左括號時會自動修復，例如 `標題 綠色漫畫爆炸)` 解析為大標 `標題` 與效果字 `綠色漫畫爆炸`。
+- 書名號 `《》`：`《` 前方有字時前方 Kerning=2300；行首 `《` 在寬度變形後左移 100px；只要 `》` 後方有字，就設定 `》` 後方 Kerning=-200，`》` 前方不修改。
+- 只有大標版將 `「`、`」` 字級設為 400pt，並將 `「` baseline shift 設為 +80pt；標圖版不修改兩者字級或 baseline shift。
 - 若 `「` 位於行首，取消前方 kerning，改為整個大標圖層向左移 140px。
-- 若 `「` 前方有文字，則 `「` 前方及其配對 `」` 後方 kerning 設為 -300；建立多個 kerning range 時需由較大的 `From` 位置往較小位置寫入。
+- 若 `「` 前方有文字，將 `「` 前方 kerning 設為 -300；若對應的 `」` 後方仍有文字，另將 `」` 後方 kerning 設為 -300，`」` 前方不修改。建立多個 kerning range 時需由較大的 `From` 位置往較小位置寫入。
 - 若去除尾端空白後 `」` 是最後一字，大標圖層以左側為錨點向右增加 70px 寬度。
 - `%` 最終規則改為固定字級：大標版 350pt、標圖版 200pt。多個 `%` 會集中在同一個 `textStyleRange` ActionList 內套用，保留原字色與效果。
+- `字小`／`字可以小一點`：大標版大標1=450pt、大標2=441pt；標圖版大標1=250pt、大標2=245pt。
 
 ### 3.5 GUI 與工作流程
 
 - 日期欄按 Enter 可切換至該日期的文字來源；瀏覽其他日期資料夾也會同步切換讀圖與輸出日期。
 - 雙擊左欄文字檔可用 Windows 預設編輯器開啟。
-- 新增右欄 `縮圖設定`：只有選到縮圖時顯示，包含版型、實際配色、主播、右上變色選單與色塊、可選左邊字、兩行大標、圖片指示、實際圖片小圖、變色／效果文字、驗證結果及完整文字檔內容。
+- 新增右欄 `縮圖設定`：只有選到縮圖時顯示，前四欄依序為版型、主播、隨機配色、右上變色，並包含可選左邊字、兩行大標、圖片指示、實際圖片小圖、變色／效果文字、驗證結果及完整文字檔內容。
 - `套用設定` 會立即重新生成；`還原設定` 會還原原始文字解析結果後重新生成。
 - 本次工作階段實際隨機選到的配色與右上變色會由 `generation_report` 回傳並保存，重開設定欄不再顯示錯誤組別。
 - 左右欄預設固定窄寬，文字或設定內容過長時自動擴寬，避免下方水平捲軸。
-- 重新生成時隱藏舊縮圖，只顯示 `Documents/CGLoading/cg-indigo-loader.svg`；找不到動畫時顯示文字後備。
+- 重新生成時隱藏舊縮圖，只顯示內建的 `cg-indigo-loader.svg`；動畫已納入 EXE 打包資源，不再依賴個人 Documents 路徑，找不到時仍顯示文字後備。
 - `待生成／已完成／失敗` 已移到待生成縮圖標題列，並依實際任務狀態更新。
 
 ### 3.6 配色來源
@@ -92,9 +96,10 @@
 - `generate_photoshop_script.py`：左邊字數字／符號排版、智慧型圖片匯入、多圖排列、大標尺寸、中文引號與 `%` 格式。
 - `gui_main.py`：日期 Enter、雙擊開檔、縮圖設定右欄、CGLoading、欄寬、狀態統計與設定重生流程。
 - `worker.py`：回傳並保存每張縮圖的實際生成配置，配合 GUI 顯示與重新生成。
-- `test_layout_variants.py`：新增及更新解析、圖片、數字符號、引號、百分比、配色與 JSX 字串斷言；目前共 29 項測試。
+- `test_layout_variants.py`：新增及更新解析、圖片、數字符號、引號、百分比、效果字、配色與 JSX 字串斷言；目前共 45 項測試。
+- `build_exe.bat`、`cg-indigo-loader.svg`：將重新生成動畫納入打包資源，避免換電腦後動畫消失。
 - `晚報變色.csv`：修正 B02 底色為 `00731b`。
-- `AGENTS.md`：補充長期架構、限制與測試命令；其中部分數值規則仍是較早摘要，實作與本交接文件的最新數值為準，下一輪應在不改功能的前提下同步長期規則。
+- `AGENTS.md`：同步目前長期架構、限制、排版數值與測試命令。
 - `PROJECT_HANDOVER.md`：本次更新至目前進度及 checkpoint 範圍。
 
 ## 6. 已嘗試但失敗的方法
@@ -146,7 +151,7 @@ python -W error -m py_compile parse_thumbnail_txt.py generate_photoshop_script.p
 通過
 
 python -m unittest test_layout_variants.py
-Ran 29 tests ... OK
+Ran 45 tests ... OK
 
 git diff --check
 無 whitespace error；只有 Git 的 LF/CRLF 與全域設定警告
@@ -154,19 +159,18 @@ git diff --check
 
 ## 10. Git 狀態與 checkpoint 範圍
 
-- 本次 checkpoint 的基底 HEAD：`f320f2b docs: correct handover checkpoint reference`。
-- checkpoint 只應包含下列已追蹤檔案：
+- 本次部署的基底 HEAD：`ed50b91 feat: harden parsing and quote review workflow`。
+- 部署提交包含：
   - `AGENTS.md`
   - `PROJECT_HANDOVER.md`
   - `generate_photoshop_script.py`
   - `gui_main.py`
   - `parse_thumbnail_txt.py`
   - `test_layout_variants.py`
-  - `worker.py`
-  - `晚報變色.csv`
+  - `build_exe.bat`
+  - `cg-indigo-loader.svg`
 - 不提交：PSD、新聞／測試文字、測試輸出、cache、log、`chat.json`、`copilot-context.md`、本地 BAT、未確認來源的 `效果字處理.csv`、憑證或任何秘密。
-- checkpoint commit 預定訊息：`wip: checkpoint thumbnail configuration and title rules`。
-- 為避免文件自我引用 commit hash，實際 checkpoint 編號請由下一個 session 執行 `git log -1 --oneline` 確認。
+- 實際部署 commit 編號以 `git log -1 --oneline` 為準。
 
 ## 11. Next Step
 
@@ -175,8 +179,8 @@ git diff --check
 3. 測試同一行含多個 `%`、引號、變色字與效果字，確認 style range 沒有互相覆蓋。
 4. 跑完整 24 則批次，核對 GUI 的待生成／已完成／失敗、實際配色紀錄、套用設定及還原設定。
 5. 在正式網路環境測 Google Sheet 更新、五分鐘節流、離線快取與本地 CSV 後備；另確認 NAS 憑證與圖片路徑。
-6. 正式打包前決定 `效果字處理.csv` 與 `開啟本地測試.bat` 是否納入 Git，並修正 `AGENTS.md` 內仍停留在舊版的數值摘要。
-7. 使用者確認 Photoshop 視覺結果後才執行正式打包與 push。
+6. 下次正式打包前決定 `效果字處理.csv` 與 `開啟本地測試.bat` 是否納入 Git；目前仍維持未追蹤，不要擅自提交。
+7. 持續依使用者的 Photoshop 本地預覽結果微調，再決定下一個正式 EXE 版本。
 
 ## 12. 給下一個 Codex agent 的關鍵上下文
 

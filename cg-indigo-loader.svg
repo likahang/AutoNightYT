@@ -1,0 +1,54 @@
+<svg class="cg-indigo-loader" xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="600 330 200 120" role="img" aria-label="Loading">
+  <style>
+    .cg-indigo-loader {
+      --loader-color: #6366f1;
+    }
+
+    .cg-indigo-loader .track-layer path {
+      stroke: var(--loader-color);
+      opacity: 0.2;
+    }
+
+    .cg-indigo-loader .anim-layer path {
+      stroke: var(--loader-color);
+      stroke-dasharray: 1000;
+      stroke-dashoffset: 1000;
+    }
+
+    .cg-indigo-loader .part-1 {
+      animation: write-c 4s ease-in-out infinite;
+    }
+
+    .cg-indigo-loader .part-2 {
+      animation: write-g 4s ease-in-out infinite;
+    }
+
+    @keyframes write-c {
+      0% { stroke-dashoffset: 1000; opacity: 1; }
+      25% { stroke-dashoffset: 0; }
+      50% { stroke-dashoffset: 0; }
+      65% { stroke-dashoffset: 1000; }
+      100% { stroke-dashoffset: 1000; opacity: 1; }
+    }
+
+    @keyframes write-g {
+      0% { stroke-dashoffset: 1000; opacity: 1; }
+      25% { stroke-dashoffset: 1000; }
+      50% { stroke-dashoffset: 0; }
+      75% { stroke-dashoffset: 0; }
+      90% { stroke-dashoffset: -1000; opacity: 1; }
+      95% { opacity: 0; }
+      100% { stroke-dashoffset: -1000; opacity: 0; }
+    }
+  </style>
+
+  <g class="track-layer" fill="none" stroke-width="7" stroke-miterlimit="10">
+    <path d="M765.2,374.7c-7.1-10.1-18.8-16.7-32.1-16.7c-21.6,0-39.2,17.5-39.2,39.2s-17.5,39.2-39.2,39.2c-21.6,0-39.2-17.5-39.2-39.2c0-21.6,17.5-39.2,39.2-39.2c13.3,0,25,6.6,32.1,16.8"/>
+    <path d="M701,419.5c7.1,10.1,18.8,16.8,32.1,16.8c21.6,0,39.2-17.5,39.2-39.2H733l39.2,0"/>
+  </g>
+
+  <g class="anim-layer" fill="none" stroke-width="7" stroke-linecap="round" stroke-miterlimit="10">
+    <path class="part-1" d="M765.2,374.7c-7.1-10.1-18.8-16.7-32.1-16.7c-21.6,0-39.2,17.5-39.2,39.2s-17.5,39.2-39.2,39.2c-21.6,0-39.2-17.5-39.2-39.2c0-21.6,17.5-39.2,39.2-39.2c13.3,0,25,6.6,32.1,16.8"/>
+    <path class="part-2" d="M701,419.5c7.1,10.1,18.8,16.8,32.1,16.8c21.6,0,39.2-17.5,39.2-39.2H733l39.2,0"/>
+  </g>
+</svg>

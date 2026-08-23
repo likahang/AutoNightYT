@@ -340,7 +340,10 @@ class FileListWidget(QListWidget):
 class CGLoadingOverlay(QWidget):
     """在縮圖上透明播放 CGLoading SVG 的描線動畫。"""
 
-    DEFAULT_SVG_PATH = Path.home() / "Documents" / "CGLoading" / "cg-indigo-loader.svg"
+    DEFAULT_SVG_PATH = (
+        Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        / "cg-indigo-loader.svg"
+    )
 
     def __init__(self, parent=None, svg_path=None):
         super().__init__(parent)
@@ -1245,6 +1248,10 @@ class MainWindow(QMainWindow):
         self.config_layout_value.setReadOnly(True)
         form.addRow("版型", self.config_layout_value)
 
+        self.config_anchor_combo = QComboBox()
+        self.config_anchor_combo.addItems(ANCHOR_NAMES)
+        form.addRow("主播", self.config_anchor_combo)
+
         self.config_color_combo = QComboBox()
         self.config_color_combo.setIconSize(QSize(20, 20))
         for color_id in sorted(self.color_schemes.keys()):
@@ -1256,11 +1263,7 @@ class MainWindow(QMainWindow):
             else:
                 self.config_color_combo.addItem(color_id)
         self.config_color_combo.currentTextChanged.connect(self.on_config_color_changed)
-        form.addRow("配色", self.config_color_combo)
-
-        self.config_anchor_combo = QComboBox()
-        self.config_anchor_combo.addItems(ANCHOR_NAMES)
-        form.addRow("主播", self.config_anchor_combo)
+        form.addRow("隨機配色", self.config_color_combo)
 
         self.config_top_right = QComboBox()
         self.config_top_right.setIconSize(QSize(20, 20))

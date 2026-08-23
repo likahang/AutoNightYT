@@ -11,6 +11,7 @@ pyinstaller ^
  --name "晚報YT縮圖生成器" ^
  --icon "icon.ico" ^
  --add-data "icon.png;." ^
+ --add-data "cg-indigo-loader.svg;." ^
  --add-data "晚報YT縮圖.psd;." ^
  --add-data "晚報YT縮圖(標圖版).psd;." ^
  --add-data "晚報變色.csv;." ^
